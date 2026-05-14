@@ -1,0 +1,24 @@
+\chapter{การออกแบบการทดลอง}
+
+\section{ข้อมูลและการสร้าง Label}
+
+ข้อมูลที่ใช้เป็นข้อมูล OHLCV แบบหลายหลักทรัพย์ พร้อม event taxonomy labels เช่น jump, drop, volume spike และ volatility shock การประเมิน dataset ในหลักฐานปัจจุบันชี้ว่าความผิดปกติมี signal เด่นในมิติความผันผวนมากกว่าทิศทางราคาดิบ
+
+\section{การแบ่ง Train, Validation และ Test}
+
+การแบ่งข้อมูลต้องทำก่อน normalization และ scaler ต้อง fit จาก training data เท่านั้น Validation data ใช้สำหรับ threshold, hyperparameter และ model selection ส่วน test data ใช้สำหรับการประเมินสุดท้ายเท่านั้น
+
+\section{Pipeline การทดลอง}
+
+pipeline ปัจจุบันใช้ entry point:
+
+\begin{verbatim}
+scripts/gbm/run_joint.py
+\end{verbatim}
+
+ซึ่งเรียกกระบวนการ train, validate, test และ visualize ตามลำดับ
+
+\section{Metric}
+
+metric หลักควรรวม precision, recall/sensitivity, specificity, F1, ROC-AUC และ PR-AUC หากมีการเปรียบเทียบหลายรอบทดลอง ควรรายงาน mean, standard deviation, confidence interval และ statistical significance test
+

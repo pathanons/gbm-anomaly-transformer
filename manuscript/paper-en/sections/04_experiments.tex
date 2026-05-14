@@ -1,0 +1,23 @@
+\section{Experiments}
+
+\subsection{Dataset}
+
+The experiments use pooled multi-ticker OHLCV windows with event-taxonomy anomaly labels. The current dataset validation evidence indicates statistically meaningful differences between normal and anomalous samples, particularly in volatility-related features.
+
+\subsection{Protocol}
+
+We use a leakage-aware train/validation/test protocol. Splitting is performed before normalization, and scalers are fitted on training data only. Validation data are used for thresholding, hyperparameter tuning, and model selection. Test data are reserved for final evaluation.
+
+\subsection{Baselines}
+
+The full publication-ready evaluation should compare the proposed method against:
+
+\begin{itemize}
+  \item vanilla Anomaly Transformer;
+  \item LSTM or GRU autoencoder;
+  \item forecasting-error detector;
+  \item rolling volatility or z-score statistical baseline.
+\end{itemize}
+
+All baselines should use the same split and comparable tuning budget.
+

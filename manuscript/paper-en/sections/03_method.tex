@@ -1,0 +1,20 @@
+\section{Method}
+
+\subsection{Problem Setup}
+
+Let $X_{t:t+w}$ denote a multi-ticker OHLCV window of length $w$. The goal is to learn an anomaly score $s(X_{t:t+w})$ that increases when the observed window departs from normal market behavior.
+
+\subsection{GBM-Aware Transformer}
+
+The model encodes each input window with a Transformer, reconstructs the input dynamics, and predicts parameters associated with GBM-style return behavior. The anomaly score combines three sources of evidence:
+
+\begin{itemize}
+  \item reconstruction error between observed and reconstructed inputs;
+  \item likelihood of observed returns under the predicted return distribution;
+  \item divergence between empirical and predicted return distributions.
+\end{itemize}
+
+\subsection{Dynamic Score-Change Threshold}
+
+We also evaluate a dynamic threshold on absolute score changes. This rule is intended as an operational alerting layer. Current evidence suggests that it can produce high precision but low sensitivity, so it should be interpreted as a conservative alert rule rather than a complete early-warning system.
+

@@ -1,0 +1,14 @@
+\section{Related Work}
+
+\subsection{Time-Series Anomaly Detection}
+
+Anomaly detection has been studied across statistical, machine learning, and deep learning settings \citep{chandola2009anomaly,pang2021deep}. In time-series data, anomalies may correspond to isolated points, subsequences, or changes in temporal regimes.
+
+\subsection{Transformers for Anomaly Detection}
+
+Transformers model sequence dependencies through attention mechanisms \citep{vaswani2017attention}. The Anomaly Transformer introduced association discrepancy as a mechanism for time-series anomaly detection \citep{xu2022anomaly}. Our work differs by using GBM-implied return consistency as a financial distributional reference rather than relying only on attention association structure.
+
+\subsection{Financial Return Modeling}
+
+Geometric Brownian Motion is a foundational model in mathematical finance and option pricing \citep{merton1973theory,hull2018options}. In this work, GBM is used as a reference distributional model for return behavior, not as a complete description of market dynamics.
+
