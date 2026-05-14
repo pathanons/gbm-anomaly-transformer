@@ -1,0 +1,25 @@
+{
+  "source_path": "C:\\Users\\Acer\\Documents\\cmu\\research\\Anomaly-Transformer\\datasets\\SP500",
+  "output_path": "C:\\Users\\Acer\\Documents\\cmu\\research\\Anomaly-Transformer\\datasets\\SP500_event_taxonomy_w50",
+  "event_taxonomy": [
+    "jump",
+    "drop",
+    "volume_spike",
+    "volatility_shock",
+    "regime_shift"
+  ],
+  "label_config": {
+    "lookback_window": 50,
+    "short_window": 10,
+    "regime_persistence": 3,
+    "return_z": 2.5,
+    "volume_z": 2.5,
+    "volatility_z": 2.0,
+    "regime_mean_z": 1.5,
+    "regime_vol_ratio": 1.5
+  },
+  "tickers": 111,
+  "rows": 840993,
+  "event_count": 95020,
+  "composite_anomaly_rate": 0.11298548263778652
+}
