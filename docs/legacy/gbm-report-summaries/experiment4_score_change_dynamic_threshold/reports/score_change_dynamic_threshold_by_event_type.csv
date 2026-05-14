@@ -1,0 +1,6 @@
+event_type,test_windows_with_event,caught_by_score_change,missed_by_score_change,catch_rate
+drop,88183,9942,78241,0.11274281891067439
+jump,88694,10168,78526,0.11464135116242362
+regime_shift,0,0,0,0.0
+volatility_shock,75929,9771,66158,0.12868600929816013
+volume_spike,100768,11982,88786,0.11890679580819308

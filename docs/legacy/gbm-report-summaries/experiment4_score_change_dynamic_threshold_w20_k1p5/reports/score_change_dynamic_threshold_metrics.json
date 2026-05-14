@@ -1,0 +1,21 @@
+{
+  "roc_auc_from_abs_score_change": 0.45780343013547137,
+  "pr_auc_from_abs_score_change": 0.9559459841182013,
+  "f1_score": 0.3930478622839895,
+  "sensitivity": 0.24741932250952095,
+  "specificity": 0.7096097356273605,
+  "precision": 0.9553677964461931,
+  "tp": 29625,
+  "tn": 3382,
+  "fp": 1384,
+  "fn": 90111,
+  "source_scores": "results\\old_experiments\\experiment3_joint\\reports\\gbm_joint_test_scores.csv",
+  "decision_rule": "score_change_pred = abs(score_t - score_t_minus_1) > dynamic_threshold_t",
+  "dynamic_threshold": "rolling median of prior abs score changes + 1.5 * robust MAD",
+  "rolling_window": 20,
+  "min_periods": 8,
+  "fallback_quantile": 0.95,
+  "n_windows": 124502,
+  "ticker_count": 111,
+  "flagged_windows": 31009
+}

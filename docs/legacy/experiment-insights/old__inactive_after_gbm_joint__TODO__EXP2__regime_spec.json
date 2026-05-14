@@ -1,0 +1,14 @@
+{
+  "pre_covid": {
+    "start": null,
+    "end": "2020-02-19"
+  },
+  "covid_crisis": {
+    "start": "2020-02-20",
+    "end": "2020-06-30"
+  },
+  "post_covid": {
+    "start": "2020-07-01",
+    "end": null
+  }
+}

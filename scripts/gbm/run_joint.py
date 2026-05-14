@@ -30,6 +30,7 @@ def run_command(command, log_handle=None):
     start = dt.datetime.now()
     env = os.environ.copy()
     env["PYTHONUNBUFFERED"] = "1"
+    env.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
     process = subprocess.Popen(
         command,
         stdout=subprocess.PIPE,
@@ -57,7 +58,7 @@ def main() -> None:
     parser.add_argument("--exp-name", default="experiment3_joint")
     parser.add_argument("--data-path", default="datasets/SP500_event_taxonomy_w100")
     parser.add_argument("--tickers", nargs="*", default=None, help="Optional explicit ticker list")
-    parser.add_argument("--device", default="cuda")
+    parser.add_argument("--device", default="auto", help="auto, cuda, mps, or cpu")
     parser.add_argument("--features", default="all", choices=["all", "price_only", "volume_only"])
     parser.add_argument("--normalize-batch", action="store_true")
     parser.add_argument("--batch-size", type=int, default=32)

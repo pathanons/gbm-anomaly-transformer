@@ -3,15 +3,18 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
 
 import pandas as pd
 import torch
 
 from src.gbm.data import build_joint_loaders, discover_tickers, get_run_dir, set_seed
+from src.gbm.device import resolve_device
 from src.gbm.io import save_json
 from src.gbm.metrics import binary_metrics
 from src.gbm.model import AnomalyTransformer
@@ -29,7 +32,7 @@ def main() -> None:
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--exp-name", default="experiment3_joint")
-    parser.add_argument("--device", default="cuda")
+    parser.add_argument("--device", default="auto", help="auto, cuda, mps, or cpu")
     parser.add_argument("--d-model", type=int, default=128)
     parser.add_argument("--n-heads", type=int, default=4)
     parser.add_argument("--e-layers", type=int, default=3)
@@ -39,7 +42,8 @@ def main() -> None:
     args = parser.parse_args()
 
     set_seed(args.seed)
-    device = torch.device(args.device if torch.cuda.is_available() else "cpu")
+    device = resolve_device(args.device)
+    print(f"[test_joint] device={device}", flush=True)
     run_dir = get_run_dir(args.exp_name)
     checkpoint_path = run_dir / "models" / "gbm_joint.pt"
     threshold_path = run_dir / "reports" / "gbm_joint_threshold.json"

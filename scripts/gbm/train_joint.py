@@ -2,15 +2,18 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
 
 import torch
 import torch.nn as nn
 
 from src.gbm.data import build_joint_loaders, discover_tickers, get_run_dir, save_joint_manifest, set_seed
+from src.gbm.device import resolve_device
 from src.gbm.io import save_json
 from src.gbm.losses import gaussian_nll, gaussian_wasserstein, score_windows
 from src.gbm.model import AnomalyTransformer
@@ -71,7 +74,7 @@ def main() -> None:
     parser.add_argument("--dropout", type=float, default=0.1)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--exp-name", default="experiment3_joint")
-    parser.add_argument("--device", default="cuda")
+    parser.add_argument("--device", default="auto", help="auto, cuda, mps, or cpu")
     parser.add_argument("--patience", type=int, default=5)
     parser.add_argument("--dist-weight", type=float, default=1.0)
     parser.add_argument("--recon-weight", type=float, default=1.0)
@@ -79,7 +82,8 @@ def main() -> None:
     args = parser.parse_args()
 
     set_seed(args.seed)
-    device = torch.device(args.device if torch.cuda.is_available() else "cpu")
+    device = resolve_device(args.device)
+    print(f"[train_joint] device={device}", flush=True)
     run_dir = get_run_dir(args.exp_name)
     run_dir.mkdir(parents=True, exist_ok=True)
 

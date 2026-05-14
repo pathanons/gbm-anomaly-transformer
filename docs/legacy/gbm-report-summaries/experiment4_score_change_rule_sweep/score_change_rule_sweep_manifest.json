@@ -1,0 +1,36 @@
+{
+  "experiment_name": "experiment4_score_change_rule_sweep",
+  "source_experiment_dir": "results\\old_experiments\\experiment3_joint",
+  "source_scores": "results\\old_experiments\\experiment3_joint\\reports\\gbm_joint_test_scores.csv",
+  "output_dir": "results\\experiments\\experiment4_score_change_rule_sweep",
+  "decision_rule": "score_change_pred = abs(score_t - score_t_minus_1) > rolling_median_prior_abs_delta + mad_k * robust_mad",
+  "parameters": {
+    "rolling_windows": [
+      20,
+      50,
+      100
+    ],
+    "mad_ks": [
+      1.5,
+      2.0,
+      2.5,
+      3.0,
+      3.5
+    ],
+    "min_periods_ratio": 0.4,
+    "fallback_quantile": 0.95,
+    "tolerance_windows": [
+      0,
+      3,
+      5,
+      10
+    ],
+    "tickers": null
+  },
+  "reports": {
+    "summary": "results\\experiments\\experiment4_score_change_rule_sweep\\reports\\score_change_rule_sweep_summary.csv",
+    "by_event_type": "results\\experiments\\experiment4_score_change_rule_sweep\\reports\\score_change_rule_sweep_by_event_type.csv",
+    "best_configs": "results\\experiments\\experiment4_score_change_rule_sweep\\reports\\score_change_rule_sweep_best_configs.csv",
+    "best_scores": "results\\experiments\\experiment4_score_change_rule_sweep\\reports\\score_change_rule_sweep_best_scores.csv"
+  }
+}

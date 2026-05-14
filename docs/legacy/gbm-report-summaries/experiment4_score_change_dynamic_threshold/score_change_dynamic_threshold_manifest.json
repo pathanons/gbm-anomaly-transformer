@@ -1,0 +1,22 @@
+{
+  "experiment_name": "experiment4_score_change_dynamic_threshold",
+  "source_experiment_dir": "results\\old_experiments\\experiment3_joint",
+  "source_scores": "results\\old_experiments\\experiment3_joint\\reports\\gbm_joint_test_scores.csv",
+  "output_dir": "results\\experiments\\experiment4_score_change_dynamic_threshold",
+  "reports": {
+    "scores": "results\\experiments\\experiment4_score_change_dynamic_threshold\\reports\\score_change_dynamic_threshold_scores.csv",
+    "metrics": "results\\experiments\\experiment4_score_change_dynamic_threshold\\reports\\score_change_dynamic_threshold_metrics.json",
+    "by_ticker": "results\\experiments\\experiment4_score_change_dynamic_threshold\\reports\\score_change_dynamic_threshold_by_ticker.csv",
+    "by_event_type": "results\\experiments\\experiment4_score_change_dynamic_threshold\\reports\\score_change_dynamic_threshold_by_event_type.csv"
+  },
+  "visualizations": "results\\experiments\\experiment4_score_change_dynamic_threshold\\visualizations",
+  "decision_rule": "score_change_pred = abs(score_t - score_t_minus_1) > dynamic_threshold_t",
+  "parameters": {
+    "rolling_window": 50,
+    "min_periods": 20,
+    "mad_k": 3.5,
+    "fallback_quantile": 0.95,
+    "top_k": 10,
+    "tickers": null
+  }
+}

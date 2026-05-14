@@ -1,0 +1,36 @@
+{
+  "volatility_correlation": {
+    "correlation_volatility_5d_anomaly": 0.398,
+    "correlation_volatility_20d_anomaly": 0.345,
+    "mean_volatility_anomaly_days": 2.378,
+    "mean_volatility_normal_days": 0.968
+  },
+  "volume_correlation": {
+    "correlation_volume_ratio_anomaly": 0.339,
+    "mean_volume_ratio_anomaly_days": 1.63,
+    "mean_volume_ratio_normal_days": 0.985,
+    "volume_ratio_difference": 0.645
+  },
+  "price_range_patterns": {
+    "mean_daily_range_anomaly": 5.63,
+    "mean_daily_range_normal": 2.262,
+    "max_daily_range": 21.574,
+    "mean_close_position_anomaly": 0.502,
+    "mean_close_position_normal": 0.508
+  },
+  "return_distribution": {
+    "mean_return_anomaly_days": -0.3135,
+    "mean_return_normal_days": 0.0525,
+    "std_return_anomaly_days": 6.0733,
+    "std_return_normal_days": 1.6961,
+    "ttest_statistic": -3.0694,
+    "ttest_p_value": 0.002151,
+    "significant_difference": "True"
+  },
+  "lead_lag_effects": {
+    "correlation_with_previous_day_price_change": 0.239,
+    "correlation_with_current_day_price_change": 0.491,
+    "correlation_with_next_day_price_change": 0.219,
+    "lead_lag_interpretation": "lags_past_movement"
+  }
+}
