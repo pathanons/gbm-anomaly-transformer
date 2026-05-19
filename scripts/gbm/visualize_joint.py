@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
+import sys
 
 import matplotlib
 
@@ -11,6 +12,10 @@ matplotlib.use("Agg")
 
 import matplotlib.pyplot as plt
 import pandas as pd
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+
+from src.gbm.paths import get_run_dir
 
 
 def contiguous_intervals(dates, mask):
@@ -54,7 +59,7 @@ def main() -> None:
     parser.add_argument("--spike-percentile", type=float, default=0.95)
     args = parser.parse_args()
 
-    run_dir = Path("results") / "experiments" / args.exp_name
+    run_dir = get_run_dir(args.exp_name)
     scores_path = run_dir / "reports" / "gbm_joint_test_scores.csv"
     if not scores_path.exists():
         raise FileNotFoundError(f"Missing joint test scores file: {scores_path}")

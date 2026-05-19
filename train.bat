@@ -22,7 +22,7 @@ if "%BATCH_SIZE%"=="" set "BATCH_SIZE=32"
 if "%EPOCHS%"=="" set "EPOCHS=20"
 if "%DEVICE%"=="" set "DEVICE=auto"
 
-%PYTHON% -u scripts\gbm\run_joint.py ^
+%PYTHON% -u scripts\gbm\train_joint.py ^
   --exp-name "%EXP_NAME%" ^
   --data-path "%DATA_PATH%" ^
   --window-size "%WINDOW_SIZE%" ^

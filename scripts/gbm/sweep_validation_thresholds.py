@@ -12,6 +12,7 @@ import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
+from src.gbm.paths import get_run_dir
 from src.gbm.io import save_json
 from src.gbm.metrics import binary_metrics
 
@@ -98,7 +99,7 @@ def sweep_thresholds(
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Sweep validation-selected score thresholds on test scores")
-    parser.add_argument("--exp-name", default=None, help="Experiment under results/experiments containing GBM reports")
+    parser.add_argument("--exp-name", default=None, help="Experiment under the configured output root containing GBM reports")
     parser.add_argument("--scores-file", default=None, help="Alternative CSV with split, score, and label columns")
     parser.add_argument("--label", default=None, help="Label used in output filenames when --scores-file is used")
     parser.add_argument("--score-column", default="score")
@@ -112,7 +113,7 @@ def main() -> None:
         raise SystemExit("Provide exactly one of --exp-name or --scores-file")
 
     if args.exp_name:
-        reports_dir = Path("results") / "experiments" / args.exp_name / "reports"
+        reports_dir = get_run_dir(args.exp_name) / "reports"
         val_scores, test_scores, label = load_gbm_scores(args.exp_name, reports_dir)
         output_dir = Path(args.output_dir) if args.output_dir else reports_dir
     else:

@@ -14,6 +14,7 @@ from torch.utils.data import DataLoader, Dataset
 
 from src.gbm.features import add_derived_features, get_feature_columns
 from src.gbm.io import save_json
+from src.gbm.paths import get_output_root, get_run_dir
 from utils.validation_helpers import detect_label_columns
 
 
@@ -37,10 +38,6 @@ def set_seed(seed: int) -> None:
         torch.cuda.manual_seed_all(seed)
     except Exception:
         pass
-
-
-def get_run_dir(exp_name: str) -> Path:
-    return Path("results") / "experiments" / exp_name
 
 
 def discover_tickers(data_path: str) -> List[str]:

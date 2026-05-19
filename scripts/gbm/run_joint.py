@@ -11,6 +11,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from src.gbm.data import discover_tickers
+from src.gbm.paths import get_run_dir
 
 
 def timestamp() -> str:
@@ -83,13 +84,17 @@ def main() -> None:
     parser.add_argument("--full-context", action="store_true")
     parser.add_argument("--spike-percentile", type=float, default=0.95)
     parser.add_argument("--log-file", default=None, help="Optional path to write a full live pipeline log")
+    parser.add_argument("--output-root", default=None, help="Root directory for generated outputs; overrides AT_OUTPUT_ROOT")
     args = parser.parse_args()
+
+    if args.output_root:
+        os.environ["AT_OUTPUT_ROOT"] = args.output_root
 
     tickers = args.tickers if args.tickers else discover_tickers(args.data_path)
     if not tickers:
         raise SystemExit(f"No tickers found in {args.data_path}")
 
-    run_dir = Path("results") / "experiments" / args.exp_name
+    run_dir = get_run_dir(args.exp_name, args.output_root)
     log_dir = run_dir / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
     log_path = Path(args.log_file) if args.log_file else log_dir / f"joint_pipeline_{dt.datetime.now().strftime('%Y%m%d_%H%M%S')}.log"

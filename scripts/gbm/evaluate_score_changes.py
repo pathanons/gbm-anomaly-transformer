@@ -16,6 +16,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import pandas as pd
 
+from src.gbm.paths import get_run_dir
 from src.gbm.io import save_json
 
 
@@ -379,7 +380,7 @@ def main() -> None:
     if not scores_path.exists():
         raise FileNotFoundError(f"Missing test score file: {scores_path}")
 
-    run_dir = Path("results") / "experiments" / args.exp_name
+    run_dir = get_run_dir(args.exp_name)
     reports_dir = run_dir / "reports"
     visual_dir = run_dir / "visualizations"
     reports_dir.mkdir(parents=True, exist_ok=True)

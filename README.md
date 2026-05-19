@@ -26,7 +26,7 @@ docs/legacy/            curated old reports, insights, and research context
 .codex/skills/          repo-local Codex skill for this project
 ```
 
-Generated outputs go under `results/experiments/<exp-name>/` and are ignored by git.
+Generated outputs go under the configured output root, then `experiments/<exp-name>/`. By default this is `results/experiments/<exp-name>/`; set `AT_OUTPUT_ROOT` to move generated runs elsewhere. On Windows, `run.bat` and `train.bat` default to `D:\AnomalyTransformerRuns` to keep large outputs off `C:/`.
 
 ## Quick Run
 
@@ -52,16 +52,18 @@ FEATURES=all
 BATCH_SIZE=32
 EPOCHS=20
 DEVICE=auto
+AT_OUTPUT_ROOT=D:\AnomalyTransformerRuns on Windows .bat entrypoints
 ```
 
-Override defaults with environment variables or append any `run_joint.py` flags:
+Override defaults with environment variables or append any `run_joint.py` flags. For example, choose a different output drive/root:
 
 ```bash
-EXP_NAME=experiment3_mps DEVICE=mps EPOCHS=5 bash run.sh --visualize
+AT_OUTPUT_ROOT=/Volumes/ResearchRuns/AnomalyTransformer EXP_NAME=experiment3_mps DEVICE=mps EPOCHS=5 bash run.sh --visualize
 ```
 
 ```bat
-set DEVICE=mps
+set AT_OUTPUT_ROOT=D:\AnomalyTransformerRuns
+set DEVICE=cpu
 set EPOCHS=5
 run.bat --visualize
 ```
@@ -108,10 +110,10 @@ run.bat --epochs 1
 ## Main Outputs
 
 ```text
-results/experiments/experiment3_joint/models/
-results/experiments/experiment3_joint/reports/
-results/experiments/experiment3_joint/splits/
-results/experiments/experiment3_joint/visualizations/
+%AT_OUTPUT_ROOT%/experiments/experiment3_joint/models/
+%AT_OUTPUT_ROOT%/experiments/experiment3_joint/reports/
+%AT_OUTPUT_ROOT%/experiments/experiment3_joint/splits/
+%AT_OUTPUT_ROOT%/experiments/experiment3_joint/visualizations/
 ```
 
 Key report files:
