@@ -27,9 +27,11 @@ def collect_joint_scores(
         for batch_idx, batch in enumerate(loader, start=1):
             x = batch["x"].to(device)
             returns = batch["returns"].to(device)
+            time_deltas = batch["time_deltas"].to(device)
             recon, mu, sigma, nu, attn_maps, obs_mu, obs_sigma, latent, association = model(
                 x,
                 returns=returns,
+                time_deltas=time_deltas,
                 return_attention=True,
             )
             recon_error = criterion(recon, x).mean(dim=(1, 2))

@@ -142,10 +142,10 @@ def main() -> None:
     )
     if args.threshold_method == "conformal":
         conformal_alpha = 1.0 - args.threshold_quantile
-        val_df["y_pred"] = (val_df["conformal_p_value"] <= conformal_alpha).astype(int)
-        test_df["y_pred"] = (test_df["conformal_p_value"] <= conformal_alpha).astype(int)
+        val_df["y_pred"] = (val_df["conformal_p_value"] < conformal_alpha).astype(int)
+        test_df["y_pred"] = (test_df["conformal_p_value"] < conformal_alpha).astype(int)
         threshold_score_column = "conformal_p_value"
-        decision_rule = "conformal_p_value_lte_alpha"
+        decision_rule = "conformal_p_value_lt_alpha"
     else:
         conformal_alpha = None
         val_df["y_pred"] = (val_df["score"] > threshold).astype(int)

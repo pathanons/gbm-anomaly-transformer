@@ -154,7 +154,7 @@ def main() -> None:
             lambda score: (float((calibration >= score).sum()) + 1.0) / (len(calibration) + 1.0)
         )
         conformal_alpha = float(threshold_info.get("conformal_alpha", 1.0 - threshold_info.get("threshold_quantile", 0.95)))
-        test_df["y_pred"] = (test_df["conformal_p_value"] <= conformal_alpha).astype(int)
+        test_df["y_pred"] = (test_df["conformal_p_value"] < conformal_alpha).astype(int)
         metric_scores = -test_df["conformal_p_value"]
         metric_threshold = -conformal_alpha
     elif threshold_score_column == "score_turning_point":
@@ -215,9 +215,13 @@ def main() -> None:
 
     ticker_rows = []
     for ticker, frame in test_df.groupby("ticker"):
-        score_column = threshold_score_column if threshold_score_column in frame else "score"
+        if threshold_score_column == "conformal_p_value" and "conformal_p_value" in frame:
+            ticker_scores = (-frame["conformal_p_value"]).tolist()
+        else:
+            score_column = threshold_score_column if threshold_score_column in frame else "score"
+            ticker_scores = frame[score_column].fillna(0.0).tolist()
         row = {"ticker": ticker}
-        row.update(binary_metrics(frame["y_true"].tolist(), frame[score_column].fillna(0.0).tolist(), metric_threshold))
+        row.update(binary_metrics(frame["y_true"].tolist(), ticker_scores, metric_threshold))
         ticker_rows.append(row)
     ticker_summary = pd.DataFrame(ticker_rows)
     ticker_summary.to_csv(reports_dir / "gbm_joint_metrics_by_ticker.csv", index=False)

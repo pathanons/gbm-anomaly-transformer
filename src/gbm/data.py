@@ -84,11 +84,17 @@ def build_windows_for_ticker(
     window_size: int,
     step: int,
     features: str,
-) -> Tuple[pd.DataFrame, np.ndarray, np.ndarray, np.ndarray, List[JointWindowRecord]]:
+) -> Tuple[pd.DataFrame, np.ndarray, np.ndarray, np.ndarray, np.ndarray, List[JointWindowRecord]]:
     enriched = add_derived_features(frame)
     feature_columns = get_feature_columns(features)
     x = np.nan_to_num(enriched[feature_columns].astype(float).to_numpy())
     returns = enriched["LogReturn"].astype(float).to_numpy()
+    date_series = pd.to_datetime(enriched["Date"])
+    raw_day_deltas = date_series.diff().dt.days.astype(float).fillna(np.nan).to_numpy()
+    positive_deltas = raw_day_deltas[np.isfinite(raw_day_deltas) & (raw_day_deltas > 0)]
+    base_delta = float(np.median(positive_deltas)) if len(positive_deltas) else 1.0
+    time_deltas = np.nan_to_num(raw_day_deltas / max(base_delta, 1e-8), nan=1.0, posinf=1.0, neginf=1.0)
+    time_deltas = np.clip(time_deltas, 1e-6, None)
     dates = enriched["Date"].astype(str).tolist()
     labels = get_label_vector(frame)
 
@@ -116,7 +122,7 @@ def build_windows_for_ticker(
                 y_true=int(np.any(y_window > 0)),
             )
         )
-    return enriched, x, returns, labels, records
+    return enriched, x, returns, time_deltas, labels, records
 
 
 def create_joint_manifest(
@@ -144,10 +150,11 @@ def create_joint_manifest(
 
     for ticker in selected_tickers:
         frame = load_ticker_frame(data_path, ticker)
-        enriched, x, returns, labels, records = build_windows_for_ticker(frame, ticker, window_size, step, features)
+        enriched, x, returns, time_deltas, labels, records = build_windows_for_ticker(frame, ticker, window_size, step, features)
         window_store[ticker] = {
             "x": x,
             "returns": returns,
+            "time_deltas": time_deltas,
             "labels": labels,
             "dates": enriched["Date"].astype(str).to_numpy(),
         }
@@ -250,12 +257,14 @@ class JointWindowDataset(Dataset):
 
         x_window = ticker_store["x"][start:end]
         returns_window = ticker_store["returns"][start:end]
+        time_deltas_window = ticker_store["time_deltas"][start:end]
         labels_window = ticker_store["labels"][start:end]
 
         if len(x_window) < self.window_size:
             pad_len = self.window_size - len(x_window)
             x_window = np.pad(x_window, ((0, pad_len), (0, 0)), mode="edge")
             returns_window = np.pad(returns_window, (0, pad_len), mode="edge" if len(returns_window) else "constant")
+            time_deltas_window = np.pad(time_deltas_window, (0, pad_len), mode="edge" if len(time_deltas_window) else "constant")
             labels_window = np.pad(labels_window, (0, pad_len), mode="constant")
 
         x_window = self.scaler.transform(x_window)
@@ -276,6 +285,7 @@ class JointWindowDataset(Dataset):
         return {
             "x": torch.tensor(x_window, dtype=torch.float32),
             "returns": torch.tensor(returns_window, dtype=torch.float32),
+            "time_deltas": torch.tensor(time_deltas_window, dtype=torch.float32),
             "y": torch.tensor(int(row["y_true"]), dtype=torch.float32),
             "meta": meta,
         }

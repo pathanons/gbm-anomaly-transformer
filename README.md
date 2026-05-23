@@ -2,8 +2,8 @@
 
 Workspace for pooled, multi-ticker financial anomaly detection on S&P 500-style OHLCV windows. There are two distinct attention-prior models:
 
-- Gaussian log-return attention: a Transformer with a Gaussian prior on log-return transition likelihoods.
-- Canonical GBM attention: a Transformer whose attention prior uses the canonical GBM price process and applies the Ito correction inside the log-price transition law.
+- Gaussian log-return attention: a Transformer with a Gaussian latent-timestamp posterior from log-return transition likelihoods.
+- Canonical GBM attention: a Transformer whose attention path uses the canonical GBM price process, applies the Ito correction inside the log-price transition law, supports per-step time deltas from observed dates, and interprets the attention target as a posterior over an explicit latent source timestamp.
 
 Use the dedicated runners below so these two models are not mixed accidentally:
 
@@ -92,6 +92,25 @@ bash run_canonical_gbm_attention.sh --predictive-distribution student_t --thresh
 By default, the joint data loader uses chronological splits with an embargo gap derived from the window size, fits normalization on training windows only, and trains only on normal training windows. Use `--include-anomalous-train` only for contamination ablations.
 
 Use `--association-mode none` for the no-prior Transformer ablation and `--association-mode temporal` for a local temporal-prior ablation.
+
+## Canonical GBM Attention Interpretation
+
+The canonical GBM mode uses the price process:
+
+```text
+dS_t = mu_t S_t dt + sigma_t S_t dW_t
+d log S_t = (mu_t - 0.5 sigma_t^2) dt + sigma_t dW_t
+```
+
+For each target time `i`, the model introduces an explicit latent source timestamp `J_i` over past timestamps `j < i` and computes:
+
+```text
+p(J_i = j | Delta L_{j->i}, theta) proportional to
+p(J_i = j) Normal(Delta L_{j->i}; sum_u alpha_u dt_u, sum_u sigma_u^2 dt_u)
+alpha_u = mu_u - 0.5 sigma_u^2
+```
+
+The candidate prior `p(J_i = j)` is uniform over past timestamps by default. The diagonal `i == j` is excluded from the continuous GBM transition density; the first row falls back to self mass only because no past timestamp exists yet. This makes the canonical path a mathematically explicit latent-index GBM transition posterior, not an unqualified Bayesian prior from GBM alone.
 
 ## Device Support
 

@@ -43,7 +43,12 @@ def run_epoch(
         for batch_idx, batch in enumerate(loader, start=1):
             x = batch["x"].to(device)
             returns = batch["returns"].to(device)
-            recon, mu, sigma, nu, obs_mu, obs_sigma, association = model(x, returns=returns)
+            time_deltas = batch["time_deltas"].to(device)
+            recon, mu, sigma, nu, obs_mu, obs_sigma, association = model(
+                x,
+                returns=returns,
+                time_deltas=time_deltas,
+            )
             recon_error = criterion(recon, x)
             nll = predictive_nll(returns, mu, sigma, nu, distribution=predictive_distribution).mean()
             pred_std = predictive_std(sigma, nu, distribution=predictive_distribution)

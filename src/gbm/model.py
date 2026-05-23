@@ -37,14 +37,22 @@ def gaussian_log_return_attention_prior(
     log_drift: torch.Tensor,
     sigma: torch.Tensor,
     n_heads: int,
+    time_deltas: Optional[torch.Tensor] = None,
     eps: float = 1e-6,
 ) -> torch.Tensor:
-    """Attention prior from Gaussian log-price transition likelihoods.
+    """Latent timestamp posterior from Gaussian log-price transitions.
 
     The drift parameter is a log-return drift alpha_t, so the transition mean
-    over j -> i is sum alpha_u across the interval.
+    over j -> i is sum alpha_u * dt_u across the interval.
     """
-    return gaussian_transition_attention_prior(returns, log_drift, sigma, n_heads, eps=eps)
+    return gaussian_transition_timestamp_posterior(
+        returns,
+        log_drift,
+        sigma,
+        n_heads,
+        time_deltas=time_deltas,
+        eps=eps,
+    )
 
 
 def canonical_gbm_attention_prior(
@@ -52,39 +60,58 @@ def canonical_gbm_attention_prior(
     price_drift: torch.Tensor,
     sigma: torch.Tensor,
     n_heads: int,
+    time_deltas: Optional[torch.Tensor] = None,
     eps: float = 1e-6,
 ) -> torch.Tensor:
-    """Attention prior from the canonical GBM price process.
+    """Latent timestamp posterior from the canonical GBM price process.
 
     For dS_t = mu_t S_t dt + sigma_t S_t dW_t, the log-price transition drift
     is mu_t - 0.5 sigma_t^2. This function applies that Ito correction before
     accumulating the interval transition density.
+
+    The returned matrix is p(J_i = j | Delta L_{j->i}, theta), where J_i is an
+    explicit latent source timestamp with a uniform prior over j < i. The
+    diagonal i == j is excluded from the continuous GBM density; only the first
+    row falls back to self mass because there is no past timestamp.
     """
     sigma = torch.clamp(sigma, min=eps)
     log_drift = price_drift - 0.5 * sigma**2
-    return gaussian_transition_attention_prior(returns, log_drift, sigma, n_heads, eps=eps)
+    return gaussian_transition_timestamp_posterior(
+        returns,
+        log_drift,
+        sigma,
+        n_heads,
+        time_deltas=time_deltas,
+        eps=eps,
+    )
 
 
-def gaussian_transition_attention_prior(
+def gaussian_transition_timestamp_posterior(
     returns: torch.Tensor,
     interval_log_drift: torch.Tensor,
     sigma: torch.Tensor,
     n_heads: int,
+    time_deltas: Optional[torch.Tensor] = None,
     eps: float = 1e-6,
 ) -> torch.Tensor:
     batch_size, length = returns.shape
     device = returns.device
+    if time_deltas is None:
+        time_deltas = torch.ones_like(returns)
+    else:
+        time_deltas = torch.clamp(time_deltas.to(device=device, dtype=returns.dtype), min=eps)
+
     log_level = torch.cumsum(returns, dim=1)
     increments = log_level[:, :, None] - log_level[:, None, :]
 
     positions = torch.arange(length, device=device)
     raw_dt = positions[:, None] - positions[None, :]
     past = raw_dt > 0
-    diagonal = raw_dt == 0
 
     sigma = torch.clamp(sigma, min=eps)
-    drift_prefix = F.pad(torch.cumsum(interval_log_drift, dim=2), (1, 0))
-    variance_prefix = F.pad(torch.cumsum(sigma**2, dim=2), (1, 0))
+    dt = time_deltas[:, None, :]
+    drift_prefix = F.pad(torch.cumsum(interval_log_drift * dt, dim=2), (1, 0))
+    variance_prefix = F.pad(torch.cumsum(sigma**2 * dt, dim=2), (1, 0))
     mean = drift_prefix[:, :, 1:, None] - drift_prefix[:, :, None, 1:]
     variance = variance_prefix[:, :, 1:, None] - variance_prefix[:, :, None, 1:]
     variance = torch.clamp(variance, min=eps)
@@ -92,9 +119,19 @@ def gaussian_transition_attention_prior(
 
     z = (increments[:, None, :, :] - mean) / std
     log_prob = -0.5 * (z**2) - torch.log(std) - 0.5 * math.log(2 * math.pi)
-    log_prob = log_prob.masked_fill(~past[None, None, :, :], -1e9)
-    log_prob = log_prob.masked_fill(diagonal[None, None, :, :], 0.0)
-    return torch.softmax(log_prob, dim=-1)
+    candidate_prior = torch.full((length, length), -1e9, device=device, dtype=returns.dtype)
+    past_counts = torch.arange(length, device=device, dtype=returns.dtype).clamp(min=1.0)
+    candidate_prior = candidate_prior.masked_fill(past, 0.0)
+    candidate_prior = candidate_prior - torch.log(past_counts[:, None])
+    posterior_logits = log_prob + candidate_prior[None, None, :, :]
+    posterior = torch.softmax(posterior_logits, dim=-1)
+    first_row = torch.zeros(length, device=device, dtype=returns.dtype)
+    first_row[0] = 1.0
+    row0_mask = (positions == 0)[None, None, :, None]
+    return torch.where(row0_mask, first_row[None, None, None, :], posterior)
+
+
+gaussian_transition_attention_prior = gaussian_transition_timestamp_posterior
 
 
 class TransitionPriorEncoderLayer(nn.Module):
@@ -135,6 +172,7 @@ class TransitionPriorEncoderLayer(nn.Module):
         self,
         x: torch.Tensor,
         returns: Optional[torch.Tensor] = None,
+        time_deltas: Optional[torch.Tensor] = None,
         attn_mask: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
         batch_size, length, d_model = x.shape
@@ -168,6 +206,7 @@ class TransitionPriorEncoderLayer(nn.Module):
                 prior_drift,
                 prior_sigma,
                 self.n_heads,
+                time_deltas=time_deltas,
             )
             discrepancy = symmetric_kl(series, prior).mean(dim=(1, 2))
 
@@ -242,13 +281,19 @@ class AnomalyTransformer(nn.Module):
             nn.Linear(d_model, 1),
         )
 
-    def forward(self, x: torch.Tensor, returns: Optional[torch.Tensor] = None, return_attention: bool = False):
+    def forward(
+        self,
+        x: torch.Tensor,
+        returns: Optional[torch.Tensor] = None,
+        time_deltas: Optional[torch.Tensor] = None,
+        return_attention: bool = False,
+    ):
         hidden = self.embedding(x)
         attn_mask = causal_mask(hidden.shape[1], hidden.device)
         attn_maps: List[Dict[str, torch.Tensor]] = []
 
         for layer in self.layers:
-            hidden, attn = layer(hidden, returns=returns, attn_mask=attn_mask)
+            hidden, attn = layer(hidden, returns=returns, time_deltas=time_deltas, attn_mask=attn_mask)
             attn_maps.append(attn)
 
         recon = self.recon_head(hidden)
@@ -274,5 +319,15 @@ class AnomalyTransformer(nn.Module):
         return recon, mu, sigma, nu, obs_mu, obs_sigma, association_discrepancy
 
 
-GaussianLogReturnAttentionTransformer = AnomalyTransformer
-CanonicalGBMAttentionTransformer = AnomalyTransformer
+class GaussianLogReturnAttentionTransformer(AnomalyTransformer):
+    def __init__(self, *args, association_mode: str = "gaussian_log_return", **kwargs):
+        if association_mode != "gaussian_log_return":
+            raise ValueError("GaussianLogReturnAttentionTransformer requires association_mode='gaussian_log_return'")
+        super().__init__(*args, association_mode="gaussian_log_return", **kwargs)
+
+
+class CanonicalGBMAttentionTransformer(AnomalyTransformer):
+    def __init__(self, *args, association_mode: str = "canonical_gbm", **kwargs):
+        if association_mode != "canonical_gbm":
+            raise ValueError("CanonicalGBMAttentionTransformer requires association_mode='canonical_gbm'")
+        super().__init__(*args, association_mode="canonical_gbm", **kwargs)

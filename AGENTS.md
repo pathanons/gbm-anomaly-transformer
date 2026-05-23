@@ -13,6 +13,7 @@ This repo is the active `gbm-anomaly-transformer` workspace. Prefer the current 
 - Curated legacy context: `docs/legacy/README.md`
 - Research claim map: `docs/RESEARCH_QUESTION_ANSWER_MAP.md`
 - Agent/context audit: `docs/AGENT_CONTEXT_AUDIT.md`
+- Canonical GBM attention interpretation: explicit latent source timestamp posterior over past timestamps, with Ito-corrected GBM log-price transitions and per-step date deltas.
 
 ## Running
 

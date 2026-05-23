@@ -26,6 +26,11 @@ train_joint.py -> validate_joint.py -> test_joint.py -> visualize_joint.py optio
 
 Do not default to archived paths from the old `Anomaly-Transformer` repo.
 
+Canonical GBM attention is implemented as an explicit latent source timestamp
+posterior over past timestamps, using GBM log-price transition likelihoods with
+Ito correction and per-step date deltas. Do not describe it as a standalone
+Bayesian prior emitted by GBM without mentioning the latent timestamp model.
+
 ## Device Policy
 
 Use `DEVICE=auto` by default. The helper in `src/gbm/device.py` resolves:

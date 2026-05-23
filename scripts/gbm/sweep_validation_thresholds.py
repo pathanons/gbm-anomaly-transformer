@@ -98,7 +98,12 @@ def sweep_thresholds(
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Sweep validation-selected score thresholds on test scores")
+    parser = argparse.ArgumentParser(
+        description=(
+            "Report validation-selected threshold sensitivity on test scores. "
+            "Do not use this script to choose a threshold after inspecting test metrics."
+        )
+    )
     parser.add_argument("--exp-name", default=None, help="Experiment under the configured output root containing GBM reports")
     parser.add_argument("--scores-file", default=None, help="Alternative CSV with split, score, and label columns")
     parser.add_argument("--label", default=None, help="Label used in output filenames when --scores-file is used")
@@ -111,6 +116,11 @@ def main() -> None:
     quantiles = parse_quantiles(args.quantiles)
     if bool(args.exp_name) == bool(args.scores_file):
         raise SystemExit("Provide exactly one of --exp-name or --scores-file")
+    print(
+        "[sweep_validation_thresholds] reporting only: thresholds are fit from validation scores; "
+        "do not select the final threshold from these test metrics.",
+        flush=True,
+    )
 
     if args.exp_name:
         reports_dir = get_run_dir(args.exp_name) / "reports"
@@ -144,6 +154,7 @@ def main() -> None:
             "val_windows": int(len(val_scores)),
             "test_windows": int(len(test_scores)),
             "selection_protocol": "each threshold is selected from validation scores only; metrics are evaluated on test scores",
+            "warning": "reporting only; do not choose a final threshold after inspecting test metrics",
             "summary": str(summary_path),
         },
     )
