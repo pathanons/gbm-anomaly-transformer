@@ -1,15 +1,15 @@
-# GBM Anomaly Transformer
+# Financial Prior Attention Transformers
 
-GBM-aware Anomaly Transformer workspace for pooled, multi-ticker financial anomaly detection on S&P 500-style OHLCV windows.
+Workspace for pooled, multi-ticker financial anomaly detection on S&P 500-style OHLCV windows. There are two distinct attention-prior models:
 
-The active path is the joint GBM pipeline:
+- Gaussian log-return attention: a Transformer with a Gaussian prior on log-return transition likelihoods.
+- Canonical GBM attention: a Transformer whose attention prior uses the canonical GBM price process and applies the Ito correction inside the log-price transition law.
+
+Use the dedicated runners below so these two models are not mixed accidentally:
 
 ```text
-scripts/gbm/run_joint.py
-  -> train_joint.py
-  -> validate_joint.py
-  -> test_joint.py
-  -> visualize_joint.py optional
+scripts/gbm/run_gaussian_log_return_attention.py
+scripts/gbm/run_canonical_gbm_attention.py
 ```
 
 ## Active Layout
@@ -51,7 +51,8 @@ WINDOW_SIZE=100
 FEATURES=all
 BATCH_SIZE=32
 EPOCHS=20
-DEVICE=auto
+PREDICTIVE_DISTRIBUTION=gaussian
+THRESHOLD_METHOD=quantile
 AT_OUTPUT_ROOT=D:\AnomalyTransformerRuns on Windows .bat entrypoints
 ```
 
@@ -67,6 +68,30 @@ set DEVICE=cpu
 set EPOCHS=5
 run.bat --visualize
 ```
+
+Gaussian log-return attention:
+
+```bat
+run_log_return_attention.bat --predictive-distribution student_t --threshold-method conformal --threshold-quantile 0.95
+```
+
+```bash
+bash run_log_return_attention.sh --predictive-distribution student_t --threshold-method conformal --threshold-quantile 0.95
+```
+
+Canonical GBM attention:
+
+```bat
+run_canonical_gbm_attention.bat --predictive-distribution student_t --threshold-method conformal --threshold-quantile 0.95
+```
+
+```bash
+bash run_canonical_gbm_attention.sh --predictive-distribution student_t --threshold-method conformal --threshold-quantile 0.95
+```
+
+By default, the joint data loader uses chronological splits with an embargo gap derived from the window size, fits normalization on training windows only, and trains only on normal training windows. Use `--include-anomalous-train` only for contamination ablations.
+
+Use `--association-mode none` for the no-prior Transformer ablation and `--association-mode temporal` for a local temporal-prior ablation.
 
 ## Device Support
 
@@ -124,7 +149,10 @@ gbm_joint_validation_scores.csv
 gbm_joint_test_scores.csv
 gbm_joint_metrics.json
 gbm_joint_metrics_by_ticker.csv
+gbm_joint_metrics_by_event_type.csv
 ```
+
+`validate_joint.py` fits the anomaly threshold on validation scores only. The default decision rule is `score > validation normal-score quantile`; `--threshold-method conformal` instead stores validation calibration scores and uses conformal p-values in test. `test_joint.py` then locks the validation rule and reports point metrics, tolerance-window metrics, by-ticker metrics, and by-event-type catch rates.
 
 ## Legacy Context
 

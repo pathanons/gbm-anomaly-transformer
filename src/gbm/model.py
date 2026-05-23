@@ -32,9 +32,42 @@ def temporal_prior(batch_size: int, n_heads: int, length: int, device: torch.dev
     return prior.unsqueeze(0).unsqueeze(0).expand(batch_size, n_heads, length, length)
 
 
-def gbm_prior_association(
+def gaussian_log_return_attention_prior(
     returns: torch.Tensor,
-    mu: torch.Tensor,
+    log_drift: torch.Tensor,
+    sigma: torch.Tensor,
+    n_heads: int,
+    eps: float = 1e-6,
+) -> torch.Tensor:
+    """Attention prior from Gaussian log-price transition likelihoods.
+
+    The drift parameter is a log-return drift alpha_t, so the transition mean
+    over j -> i is sum alpha_u across the interval.
+    """
+    return gaussian_transition_attention_prior(returns, log_drift, sigma, n_heads, eps=eps)
+
+
+def canonical_gbm_attention_prior(
+    returns: torch.Tensor,
+    price_drift: torch.Tensor,
+    sigma: torch.Tensor,
+    n_heads: int,
+    eps: float = 1e-6,
+) -> torch.Tensor:
+    """Attention prior from the canonical GBM price process.
+
+    For dS_t = mu_t S_t dt + sigma_t S_t dW_t, the log-price transition drift
+    is mu_t - 0.5 sigma_t^2. This function applies that Ito correction before
+    accumulating the interval transition density.
+    """
+    sigma = torch.clamp(sigma, min=eps)
+    log_drift = price_drift - 0.5 * sigma**2
+    return gaussian_transition_attention_prior(returns, log_drift, sigma, n_heads, eps=eps)
+
+
+def gaussian_transition_attention_prior(
+    returns: torch.Tensor,
+    interval_log_drift: torch.Tensor,
     sigma: torch.Tensor,
     n_heads: int,
     eps: float = 1e-6,
@@ -46,26 +79,41 @@ def gbm_prior_association(
 
     positions = torch.arange(length, device=device)
     raw_dt = positions[:, None] - positions[None, :]
-    valid = raw_dt >= 0
-    dt = raw_dt.clamp(min=1).float()
+    past = raw_dt > 0
+    diagonal = raw_dt == 0
 
-    mu = mu[:, :, :, None]
-    sigma = torch.clamp(sigma[:, :, :, None], min=eps)
-    mean = mu * dt[None, None, :, :]
-    std = sigma * torch.sqrt(dt)[None, None, :, :]
+    sigma = torch.clamp(sigma, min=eps)
+    drift_prefix = F.pad(torch.cumsum(interval_log_drift, dim=2), (1, 0))
+    variance_prefix = F.pad(torch.cumsum(sigma**2, dim=2), (1, 0))
+    mean = drift_prefix[:, :, 1:, None] - drift_prefix[:, :, None, 1:]
+    variance = variance_prefix[:, :, 1:, None] - variance_prefix[:, :, None, 1:]
+    variance = torch.clamp(variance, min=eps)
+    std = torch.sqrt(variance)
+
     z = (increments[:, None, :, :] - mean) / std
     log_prob = -0.5 * (z**2) - torch.log(std) - 0.5 * math.log(2 * math.pi)
-    log_prob = log_prob.masked_fill(~valid[None, None, :, :], -1e9)
+    log_prob = log_prob.masked_fill(~past[None, None, :, :], -1e9)
+    log_prob = log_prob.masked_fill(diagonal[None, None, :, :], 0.0)
     return torch.softmax(log_prob, dim=-1)
 
 
-class GBMEncoderLayer(nn.Module):
-    def __init__(self, d_model: int, n_heads: int, d_ff: int, dropout: float):
+class TransitionPriorEncoderLayer(nn.Module):
+    def __init__(
+        self,
+        d_model: int,
+        n_heads: int,
+        d_ff: int,
+        dropout: float,
+        association_mode: str = "gaussian_log_return",
+    ):
         super().__init__()
         if d_model % n_heads != 0:
             raise ValueError("d_model must be divisible by n_heads")
+        if association_mode not in {"gaussian_log_return", "canonical_gbm", "temporal", "none"}:
+            raise ValueError("association_mode must be gaussian_log_return, canonical_gbm, temporal, or none")
         self.n_heads = n_heads
         self.head_dim = d_model // n_heads
+        self.association_mode = association_mode
         self.q_proj = nn.Linear(d_model, d_model)
         self.k_proj = nn.Linear(d_model, d_model)
         self.v_proj = nn.Linear(d_model, d_model)
@@ -101,13 +149,27 @@ class GBMEncoderLayer(nn.Module):
         attn_values = torch.matmul(self.attn_dropout(series), v)
         attn_out = self.out_proj(attn_values.transpose(1, 2).contiguous().view(batch_size, length, d_model))
 
-        prior_mu = self.mu_prior(x).transpose(1, 2)
+        prior_drift = self.mu_prior(x).transpose(1, 2)
         prior_sigma = F.softplus(self.sigma_prior(x)).transpose(1, 2) + 1e-4
-        if returns is None:
+        if self.association_mode == "none":
+            prior = series.detach()
+            discrepancy = torch.zeros(batch_size, device=x.device)
+        elif self.association_mode == "temporal" or returns is None:
             prior = temporal_prior(batch_size, self.n_heads, length, x.device)
+            discrepancy = symmetric_kl(series, prior).mean(dim=(1, 2))
         else:
-            prior = gbm_prior_association(returns, prior_mu, prior_sigma, self.n_heads)
-        discrepancy = symmetric_kl(series, prior).mean(dim=(1, 2))
+            prior_fn = (
+                canonical_gbm_attention_prior
+                if self.association_mode == "canonical_gbm"
+                else gaussian_log_return_attention_prior
+            )
+            prior = prior_fn(
+                returns,
+                prior_drift,
+                prior_sigma,
+                self.n_heads,
+            )
+            discrepancy = symmetric_kl(series, prior).mean(dim=(1, 2))
 
         x = self.norm1(x + self.dropout(attn_out))
         ff_out = self.ff(x)
@@ -116,7 +178,7 @@ class GBMEncoderLayer(nn.Module):
             "series": series,
             "prior": prior,
             "discrepancy": discrepancy,
-            "prior_mu": prior_mu,
+            "prior_drift": prior_drift,
             "prior_sigma": prior_sigma,
         }
 
@@ -132,14 +194,31 @@ class AnomalyTransformer(nn.Module):
         e_layers: int = 3,
         d_ff: int = 256,
         dropout: float = 0.1,
+        predictive_distribution: str = "gaussian",
+        association_mode: str = "gaussian_log_return",
     ):
         super().__init__()
+        if predictive_distribution not in {"gaussian", "student_t"}:
+            raise ValueError("predictive_distribution must be gaussian or student_t")
+        if association_mode not in {"gaussian_log_return", "canonical_gbm", "temporal", "none"}:
+            raise ValueError("association_mode must be gaussian_log_return, canonical_gbm, temporal, or none")
         self.win_size = win_size
         self.enc_in = enc_in
         self.c_out = c_out
+        self.predictive_distribution = predictive_distribution
+        self.association_mode = association_mode
         self.embedding = DataEmbedding(enc_in, d_model, dropout)
         self.layers = nn.ModuleList(
-            [GBMEncoderLayer(d_model=d_model, n_heads=n_heads, d_ff=d_ff, dropout=dropout) for _ in range(e_layers)]
+            [
+                TransitionPriorEncoderLayer(
+                    d_model=d_model,
+                    n_heads=n_heads,
+                    d_ff=d_ff,
+                    dropout=dropout,
+                    association_mode=association_mode,
+                )
+                for _ in range(e_layers)
+            ]
         )
         summary_dim = d_model * 2
         self.recon_head = nn.Sequential(
@@ -153,6 +232,11 @@ class AnomalyTransformer(nn.Module):
             nn.Linear(d_model, 1),
         )
         self.sigma_head = nn.Sequential(
+            nn.Linear(summary_dim, d_model),
+            nn.GELU(),
+            nn.Linear(d_model, 1),
+        )
+        self.nu_head = nn.Sequential(
             nn.Linear(summary_dim, d_model),
             nn.GELU(),
             nn.Linear(d_model, 1),
@@ -171,6 +255,9 @@ class AnomalyTransformer(nn.Module):
         pooled = torch.cat([hidden.mean(dim=1), hidden[:, -1, :]], dim=-1)
         mu = self.mu_head(pooled).squeeze(-1)
         sigma = F.softplus(self.sigma_head(pooled)).squeeze(-1) + 1e-4
+        nu = None
+        if self.predictive_distribution == "student_t":
+            nu = F.softplus(self.nu_head(pooled)).squeeze(-1) + 2.1
 
         obs_mu = None
         obs_sigma = None
@@ -183,8 +270,9 @@ class AnomalyTransformer(nn.Module):
             association_discrepancy = torch.stack([attn["discrepancy"] for attn in attn_maps], dim=0).mean(dim=0)
 
         if return_attention:
-            return recon, mu, sigma, attn_maps, obs_mu, obs_sigma, hidden, association_discrepancy
-        return recon, mu, sigma, obs_mu, obs_sigma, association_discrepancy
+            return recon, mu, sigma, nu, attn_maps, obs_mu, obs_sigma, hidden, association_discrepancy
+        return recon, mu, sigma, nu, obs_mu, obs_sigma, association_discrepancy
 
 
-GBMAnomalyTransformer = AnomalyTransformer
+GaussianLogReturnAttentionTransformer = AnomalyTransformer
+CanonicalGBMAttentionTransformer = AnomalyTransformer

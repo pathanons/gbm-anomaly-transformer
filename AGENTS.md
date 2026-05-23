@@ -1,10 +1,12 @@
 # Agent Instructions
 
-This repo is the active `gbm-anomaly-transformer` workspace. Prefer the current GBM joint pipeline over archived Anomaly Transformer, power-law, or regime code.
+This repo is the active `gbm-anomaly-transformer` workspace. Prefer the current financial prior attention pipelines over archived Anomaly Transformer, power-law, or regime code.
 
 ## Source Of Truth
 
-- Runtime entry point: `scripts/gbm/run_joint.py`
+- Gaussian log-return runner: `scripts/gbm/run_gaussian_log_return_attention.py`
+- Canonical GBM runner: `scripts/gbm/run_canonical_gbm_attention.py`
+- Shared runtime entry point: `scripts/gbm/run_joint.py`
 - Device helper: `src/gbm/device.py`
 - Cross-platform launchers: `run.bat`, `run.sh`
 - Mac MPS environment: `environment.macos-mps.yml`

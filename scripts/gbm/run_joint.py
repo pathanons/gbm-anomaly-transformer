@@ -62,6 +62,9 @@ def main() -> None:
     parser.add_argument("--device", default="auto", help="auto, cuda, mps, or cpu")
     parser.add_argument("--features", default="all", choices=["all", "price_only", "volume_only"])
     parser.add_argument("--normalize-batch", action="store_true")
+    parser.add_argument("--split-method", default="chronological", choices=["chronological", "random"])
+    parser.add_argument("--purge-gap", type=int, default=None, help="Embargo gap in windows between chronological splits")
+    parser.add_argument("--include-anomalous-train", action="store_true", help="Allow labeled anomalous windows in training")
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--epochs", type=int, default=20)
     parser.add_argument("--lr", type=float, default=1e-4)
@@ -73,12 +76,20 @@ def main() -> None:
     parser.add_argument("--e-layers", type=int, default=3)
     parser.add_argument("--d-ff", type=int, default=256)
     parser.add_argument("--dropout", type=float, default=0.1)
+    parser.add_argument("--predictive-distribution", default="gaussian", choices=["gaussian", "student_t"])
+    parser.add_argument(
+        "--association-mode",
+        default="gaussian_log_return",
+        choices=["gaussian_log_return", "canonical_gbm", "temporal", "none"],
+    )
     parser.add_argument("--patience", type=int, default=5)
     parser.add_argument("--dist-weight", type=float, default=1.0)
     parser.add_argument("--recon-weight", type=float, default=1.0)
     parser.add_argument("--divergence-weight", type=float, default=0.25)
     parser.add_argument("--association-weight", type=float, default=0.1)
     parser.add_argument("--threshold-quantile", type=float, default=0.95)
+    parser.add_argument("--threshold-method", default="quantile", choices=["quantile", "conformal"])
+    parser.add_argument("--tolerance-windows", type=int, default=3)
     parser.add_argument("--visualize", action="store_true", help="Generate joint price/score charts after testing")
     parser.add_argument("--show-true-labels", action="store_true")
     parser.add_argument("--top-k", type=int, default=10)
@@ -117,6 +128,8 @@ def main() -> None:
         args.device,
         "--features",
         args.features,
+        "--split-method",
+        args.split_method,
         "--batch-size",
         str(args.batch_size),
         "--epochs",
@@ -139,6 +152,10 @@ def main() -> None:
         str(args.d_ff),
         "--dropout",
         str(args.dropout),
+        "--predictive-distribution",
+        args.predictive_distribution,
+        "--association-mode",
+        args.association_mode,
         "--patience",
         str(args.patience),
         "--dist-weight",
@@ -159,6 +176,8 @@ def main() -> None:
         args.device,
         "--features",
         args.features,
+        "--split-method",
+        args.split_method,
         "--batch-size",
         str(args.batch_size),
         "--window-size",
@@ -177,11 +196,25 @@ def main() -> None:
         str(args.d_ff),
         "--dropout",
         str(args.dropout),
+        "--predictive-distribution",
+        args.predictive_distribution,
+        "--association-mode",
+        args.association_mode,
+        "--dist-weight",
+        str(args.dist_weight),
         "--recon-weight",
         str(args.recon_weight),
+        "--divergence-weight",
+        str(args.divergence_weight),
         "--association-weight",
         str(args.association_weight),
     ]
+    if args.purge_gap is not None:
+        train_common.extend(["--purge-gap", str(args.purge_gap)])
+        eval_common.extend(["--purge-gap", str(args.purge_gap)])
+    if args.include_anomalous_train:
+        train_common.append("--include-anomalous-train")
+        eval_common.append("--include-anomalous-train")
     if args.normalize_batch:
         train_common.append("--normalize-batch")
         eval_common.append("--normalize-batch")
@@ -199,9 +232,35 @@ def main() -> None:
         log("starting train stage", log_handle)
         run_command([sys.executable, "-u", "scripts/gbm/train_joint.py", *train_common, "--tickers", *tickers], log_handle)
         log("starting validation stage", log_handle)
-        run_command([sys.executable, "-u", "scripts/gbm/validate_joint.py", *eval_common, "--threshold-quantile", str(args.threshold_quantile), "--tickers", *tickers], log_handle)
+        run_command(
+            [
+                sys.executable,
+                "-u",
+                "scripts/gbm/validate_joint.py",
+                *eval_common,
+                "--threshold-quantile",
+                str(args.threshold_quantile),
+                "--threshold-method",
+                args.threshold_method,
+                "--tickers",
+                *tickers,
+            ],
+            log_handle,
+        )
         log("starting test stage", log_handle)
-        run_command([sys.executable, "-u", "scripts/gbm/test_joint.py", *eval_common, "--tickers", *tickers], log_handle)
+        run_command(
+            [
+                sys.executable,
+                "-u",
+                "scripts/gbm/test_joint.py",
+                *eval_common,
+                "--tolerance-windows",
+                str(args.tolerance_windows),
+                "--tickers",
+                *tickers,
+            ],
+            log_handle,
+        )
         if args.visualize:
             log("starting visualization stage", log_handle)
             visualize_cmd = [

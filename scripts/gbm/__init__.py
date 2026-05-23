@@ -1,1 +1,1 @@
-"""Command-line entrypoints for the GBM joint pipeline."""
+"""Command-line entrypoints for financial prior attention experiments."""

@@ -63,7 +63,7 @@ def as_bool(value: object, default: bool = False) -> bool:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Run the joint GBM pipeline from a flat YAML config")
+    parser = argparse.ArgumentParser(description="Run a joint financial prior attention pipeline from a flat YAML config")
     parser.add_argument("--config", required=True, help="Path to the YAML config file")
     parser.add_argument("--dry-run", action="store_true", help="Print the resolved command without running it")
     args = parser.parse_args()
@@ -108,6 +108,8 @@ def main() -> None:
         add_option("--data-path", resolve_template(config.get("data_path"), window_size, base_data_path))
         add_option("--device", config.get("device", "auto"))
         add_option("--features", config.get("features", "all"))
+        add_option("--split-method", config.get("split_method", "chronological"))
+        add_option("--purge-gap", config.get("purge_gap"))
         add_option("--batch-size", config.get("batch_size", 32))
         add_option("--epochs", config.get("epochs", 20))
         add_option("--lr", config.get("lr", 1e-4))
@@ -119,12 +121,16 @@ def main() -> None:
         add_option("--e-layers", config.get("e_layers", 3))
         add_option("--d-ff", config.get("d_ff", 256))
         add_option("--dropout", config.get("dropout", 0.1))
+        add_option("--predictive-distribution", config.get("predictive_distribution", "gaussian"))
+        add_option("--association-mode", config.get("association_mode", "gaussian_log_return"))
         add_option("--patience", config.get("patience", 5))
         add_option("--dist-weight", config.get("dist_weight", 1.0))
         add_option("--recon-weight", config.get("recon_weight", 1.0))
         add_option("--divergence-weight", config.get("divergence_weight", 0.25))
         add_option("--association-weight", config.get("association_weight", 0.1))
         add_option("--threshold-quantile", config.get("threshold_quantile", 0.95))
+        add_option("--threshold-method", config.get("threshold_method", "quantile"))
+        add_option("--tolerance-windows", config.get("tolerance_windows", 3))
         add_option("--top-k", config.get("top_k", 10))
         add_option("--spike-percentile", config.get("spike_percentile", 0.95))
         add_option("--tail-days", config.get("tail_days"))
@@ -137,6 +143,8 @@ def main() -> None:
 
         if as_bool(config.get("normalize_batch")):
             command.append("--normalize-batch")
+        if as_bool(config.get("include_anomalous_train")):
+            command.append("--include-anomalous-train")
         if as_bool(config.get("visualize")):
             command.append("--visualize")
         if as_bool(config.get("show_true_labels")):

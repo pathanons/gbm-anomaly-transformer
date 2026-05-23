@@ -15,7 +15,7 @@ import torch.nn as nn
 from src.gbm.data import build_joint_loaders, discover_tickers, get_run_dir, save_joint_manifest, set_seed
 from src.gbm.device import resolve_device
 from src.gbm.io import save_json
-from src.gbm.losses import gaussian_nll, gaussian_wasserstein
+from src.gbm.losses import gaussian_wasserstein, predictive_nll, predictive_std
 from src.gbm.model import AnomalyTransformer
 
 
@@ -28,6 +28,7 @@ def run_epoch(
     recon_weight=1.0,
     divergence_weight=0.25,
     association_weight=0.1,
+    predictive_distribution="gaussian",
 ):
     is_train = optimizer is not None
     model.train(is_train)
@@ -42,10 +43,11 @@ def run_epoch(
         for batch_idx, batch in enumerate(loader, start=1):
             x = batch["x"].to(device)
             returns = batch["returns"].to(device)
-            recon, mu, sigma, obs_mu, obs_sigma, association = model(x, returns=returns)
+            recon, mu, sigma, nu, obs_mu, obs_sigma, association = model(x, returns=returns)
             recon_error = criterion(recon, x)
-            nll = gaussian_nll(returns, mu, sigma).mean()
-            divergence = gaussian_wasserstein(obs_mu, obs_sigma, mu, sigma).mean()
+            nll = predictive_nll(returns, mu, sigma, nu, distribution=predictive_distribution).mean()
+            pred_std = predictive_std(sigma, nu, distribution=predictive_distribution)
+            divergence = gaussian_wasserstein(obs_mu, obs_sigma, mu, pred_std).mean()
             association_loss = association.mean() if association is not None else torch.zeros((), device=device)
             loss = (
                 recon_weight * recon_error
@@ -73,13 +75,16 @@ def run_epoch(
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Train a single EXP3 GBM model on all tickers jointly")
+    parser = argparse.ArgumentParser(description="Train a financial prior attention model on all tickers jointly")
     parser.add_argument("--data-path", default="datasets/SP500_event_taxonomy_w100")
     parser.add_argument("--tickers", nargs="*", default=None, help="Optional explicit ticker list")
     parser.add_argument("--window-size", type=int, default=100)
     parser.add_argument("--step", type=int, default=1)
     parser.add_argument("--features", default="all", choices=["all", "price_only", "volume_only"])
     parser.add_argument("--normalize-batch", action="store_true")
+    parser.add_argument("--split-method", default="chronological", choices=["chronological", "random"])
+    parser.add_argument("--purge-gap", type=int, default=None, help="Embargo gap in windows between chronological splits")
+    parser.add_argument("--include-anomalous-train", action="store_true", help="Allow labeled anomalous windows in training")
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--epochs", type=int, default=20)
     parser.add_argument("--lr", type=float, default=1e-4)
@@ -88,6 +93,12 @@ def main() -> None:
     parser.add_argument("--e-layers", type=int, default=3)
     parser.add_argument("--d-ff", type=int, default=256)
     parser.add_argument("--dropout", type=float, default=0.1)
+    parser.add_argument("--predictive-distribution", default="gaussian", choices=["gaussian", "student_t"])
+    parser.add_argument(
+        "--association-mode",
+        default="gaussian_log_return",
+        choices=["gaussian_log_return", "canonical_gbm", "temporal", "none"],
+    )
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--exp-name", default="experiment3_joint")
     parser.add_argument("--device", default="auto", help="auto, cuda, mps, or cpu")
@@ -113,8 +124,21 @@ def main() -> None:
         features=args.features,
         normalize_batch=args.normalize_batch,
         seed=args.seed,
+        split_method=args.split_method,
+        purge_gap=args.purge_gap,
+        train_normal_only=not args.include_anomalous_train,
     )
-    manifest_path = save_joint_manifest(run_dir, manifest, args.seed, args.window_size, args.step, args.features)
+    manifest_path = save_joint_manifest(
+        run_dir,
+        manifest,
+        args.seed,
+        args.window_size,
+        args.step,
+        args.features,
+        split_method=args.split_method,
+        purge_gap=args.purge_gap,
+        train_normal_only=not args.include_anomalous_train,
+    )
 
     split_counts = manifest["split"].value_counts().to_dict()
     print(f"[train_joint] windows={len(manifest)} | split_counts={split_counts}")
@@ -132,6 +156,8 @@ def main() -> None:
         e_layers=args.e_layers,
         d_ff=args.d_ff,
         dropout=args.dropout,
+        predictive_distribution=args.predictive_distribution,
+        association_mode=args.association_mode,
     ).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
 
@@ -153,6 +179,7 @@ def main() -> None:
             recon_weight=args.recon_weight,
             divergence_weight=args.divergence_weight,
             association_weight=args.association_weight,
+            predictive_distribution=args.predictive_distribution,
         )
         val_loss = run_epoch(
             model,
@@ -163,6 +190,7 @@ def main() -> None:
             recon_weight=args.recon_weight,
             divergence_weight=args.divergence_weight,
             association_weight=args.association_weight,
+            predictive_distribution=args.predictive_distribution,
         )
         history.append({"epoch": epoch + 1, "train_loss": train_loss, "val_loss": val_loss})
         print(f"Epoch {epoch + 1:03d}/{args.epochs} | train={train_loss:.6f} | val={val_loss:.6f}")

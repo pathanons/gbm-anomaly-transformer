@@ -4,7 +4,7 @@ import pandas as pd
 import torch
 import torch.nn as nn
 
-from src.gbm.losses import gaussian_nll, gaussian_wasserstein, score_windows
+from src.gbm.losses import gaussian_wasserstein, predictive_nll, predictive_std, score_windows
 
 
 def collect_joint_scores(
@@ -12,8 +12,11 @@ def collect_joint_scores(
     loader,
     device,
     phase: str,
-    recon_weight: float = 0.25,
+    dist_weight: float = 1.0,
+    recon_weight: float = 1.0,
+    divergence_weight: float = 0.25,
     association_weight: float = 0.1,
+    predictive_distribution: str = "gaussian",
 ) -> pd.DataFrame:
     model.eval()
     rows = []
@@ -24,20 +27,23 @@ def collect_joint_scores(
         for batch_idx, batch in enumerate(loader, start=1):
             x = batch["x"].to(device)
             returns = batch["returns"].to(device)
-            recon, mu, sigma, attn_maps, obs_mu, obs_sigma, latent, association = model(
+            recon, mu, sigma, nu, attn_maps, obs_mu, obs_sigma, latent, association = model(
                 x,
                 returns=returns,
                 return_attention=True,
             )
             recon_error = criterion(recon, x).mean(dim=(1, 2))
-            nll = gaussian_nll(returns, mu, sigma).mean(dim=1)
-            divergence = gaussian_wasserstein(obs_mu, obs_sigma, mu, sigma)
+            nll = predictive_nll(returns, mu, sigma, nu, distribution=predictive_distribution).mean(dim=1)
+            pred_std = predictive_std(sigma, nu, distribution=predictive_distribution)
+            divergence = gaussian_wasserstein(obs_mu, obs_sigma, mu, pred_std)
             score = score_windows(
                 recon_error,
                 nll,
                 divergence,
                 association=association,
+                dist_weight=dist_weight,
                 recon_weight=recon_weight,
+                divergence_weight=divergence_weight,
                 association_weight=association_weight,
             )
 
@@ -61,10 +67,13 @@ def collect_joint_scores(
                         "divergence": float(divergence[idx].item()),
                         "association_discrepancy": float(association[idx].item()) if association is not None else 0.0,
                         "score": float(score[idx].item()),
+                        "predictive_distribution": predictive_distribution,
                         "mu_pred": float(mu[idx].item()),
                         "sigma_pred": float(sigma[idx].item()),
+                        "nu_pred": float(nu[idx].item()) if nu is not None else float("nan"),
                         "mu_obs": float(obs_mu[idx].item()),
                         "sigma_obs": float(obs_sigma[idx].item()),
+                        "tail_z_abs": float((torch.abs(returns[idx] - mu[idx]) / pred_std[idx]).max().item()),
                     }
                 )
 

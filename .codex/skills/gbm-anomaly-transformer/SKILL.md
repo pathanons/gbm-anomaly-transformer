@@ -1,19 +1,22 @@
 ---
 name: gbm-anomaly-transformer
-description: Use when working in this repo on GBM-aware Anomaly Transformer experiments, cross-platform runners, Mac Apple Silicon MPS support, validation/test evaluation, or curated legacy research context.
+description: Use when working in this repo on Gaussian log-return or canonical GBM attention experiments, cross-platform runners, Mac Apple Silicon MPS support, validation/test evaluation, or curated legacy research context.
 ---
 
 # GBM Anomaly Transformer Skill
 
 Use this skill for the active `gbm-anomaly-transformer` repo.
 
-## Current Pipeline
+## Current Pipelines
 
-The active experiment runner is:
+The preferred dedicated experiment runners are:
 
 ```bash
-python scripts/gbm/run_joint.py
+python scripts/gbm/run_gaussian_log_return_attention.py
+python scripts/gbm/run_canonical_gbm_attention.py
 ```
+
+`run_joint.py` is the shared orchestrator used by those dedicated runners.
 
 It orchestrates:
 

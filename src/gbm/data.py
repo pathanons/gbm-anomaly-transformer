@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import random
 from dataclasses import dataclass
+import math
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
 
@@ -126,7 +127,12 @@ def create_joint_manifest(
     features: str,
     seed: int,
     split_ratios: Tuple[float, float, float] = (0.7, 0.15, 0.15),
+    split_method: str = "chronological",
+    purge_gap: Optional[int] = None,
+    train_normal_only: bool = True,
 ) -> Tuple[pd.DataFrame, Dict[str, Dict[str, np.ndarray]], StandardScaler]:
+    if split_method not in {"chronological", "random"}:
+        raise ValueError("split_method must be chronological or random")
     selected_tickers = list(tickers) if tickers else discover_tickers(data_path)
     if not selected_tickers:
         raise SystemExit(f"No tickers found in {data_path}")
@@ -162,27 +168,44 @@ def create_joint_manifest(
             )
 
     manifest = pd.DataFrame(manifest_rows)
-    rng = np.random.default_rng(seed)
-    permutation = rng.permutation(len(manifest))
-    n_total = len(manifest)
-    n_train = int(n_total * split_ratios[0])
-    n_val = int(n_total * split_ratios[1])
-    train_ids = set(permutation[:n_train].tolist())
-    val_ids = set(permutation[n_train: n_train + n_val].tolist())
-    test_ids = set(permutation[n_train + n_val :].tolist())
-
-    split_values = []
-    for sample_id in manifest["sample_id"].tolist():
-        if sample_id in train_ids:
-            split_values.append("train")
-        elif sample_id in val_ids:
-            split_values.append("val")
-        else:
-            split_values.append("test")
-    manifest["split"] = split_values
+    if split_method == "random":
+        rng = np.random.default_rng(seed)
+        permutation = rng.permutation(len(manifest))
+        n_total = len(manifest)
+        n_train = int(n_total * split_ratios[0])
+        n_val = int(n_total * split_ratios[1])
+        train_ids = set(permutation[:n_train].tolist())
+        val_ids = set(permutation[n_train: n_train + n_val].tolist())
+        split_values = []
+        for sample_id in manifest["sample_id"].tolist():
+            if sample_id in train_ids:
+                split_values.append("train")
+            elif sample_id in val_ids:
+                split_values.append("val")
+            else:
+                split_values.append("test")
+        manifest["split"] = split_values
+    else:
+        effective_gap = math.ceil((window_size - 1) / max(1, step)) if purge_gap is None else max(0, purge_gap)
+        manifest["split"] = "purged"
+        for _, group in manifest.groupby("ticker", sort=False):
+            ordered = group.sort_values("start_idx")
+            n_total = len(ordered)
+            n_train = int(n_total * split_ratios[0])
+            n_val = int(n_total * split_ratios[1])
+            train_end = n_train
+            val_start = min(n_total, train_end + effective_gap)
+            val_end = min(n_total, val_start + n_val)
+            test_start = min(n_total, val_end + effective_gap)
+            manifest.loc[ordered.iloc[:train_end].index, "split"] = "train"
+            manifest.loc[ordered.iloc[val_start:val_end].index, "split"] = "val"
+            manifest.loc[ordered.iloc[test_start:].index, "split"] = "test"
+        manifest = manifest[manifest["split"].isin({"train", "val", "test"})].reset_index(drop=True)
 
     train_mask = manifest["split"] == "train"
-    train_windows = [sample_rows[i] for i, keep in enumerate(train_mask.tolist()) if keep]
+    if train_normal_only:
+        train_mask = train_mask & (manifest["y_true"] == 0)
+    train_windows = [sample_rows[int(sample_id)] for sample_id in manifest.loc[train_mask, "sample_id"].tolist()]
     if not train_windows:
         raise RuntimeError("No train windows were created")
     train_stack = np.concatenate(train_windows, axis=0)
@@ -200,11 +223,15 @@ class JointWindowDataset(Dataset):
         window_size: int,
         normalize_batch: bool,
         split: str,
+        train_normal_only: bool = True,
     ):
         super().__init__()
         if split not in {"train", "val", "test"}:
             raise ValueError("split must be train, val, or test")
-        self.manifest = manifest[manifest["split"] == split].reset_index(drop=True)
+        split_manifest = manifest[manifest["split"] == split]
+        if split == "train" and train_normal_only:
+            split_manifest = split_manifest[split_manifest["y_true"] == 0]
+        self.manifest = split_manifest.reset_index(drop=True)
         self.window_store = window_store
         self.scaler = scaler
         self.window_size = window_size
@@ -264,6 +291,9 @@ def build_joint_loaders(
     normalize_batch: bool,
     seed: int,
     split_ratios: Tuple[float, float, float] = (0.7, 0.15, 0.15),
+    split_method: str = "chronological",
+    purge_gap: Optional[int] = None,
+    train_normal_only: bool = True,
 ):
     manifest, window_store, scaler = create_joint_manifest(
         data_path=data_path,
@@ -273,11 +303,14 @@ def build_joint_loaders(
         features=features,
         seed=seed,
         split_ratios=split_ratios,
+        split_method=split_method,
+        purge_gap=purge_gap,
+        train_normal_only=train_normal_only,
     )
 
-    train_ds = JointWindowDataset(manifest, window_store, scaler, window_size, normalize_batch, "train")
-    val_ds = JointWindowDataset(manifest, window_store, scaler, window_size, normalize_batch, "val")
-    test_ds = JointWindowDataset(manifest, window_store, scaler, window_size, normalize_batch, "test")
+    train_ds = JointWindowDataset(manifest, window_store, scaler, window_size, normalize_batch, "train", train_normal_only=train_normal_only)
+    val_ds = JointWindowDataset(manifest, window_store, scaler, window_size, normalize_batch, "val", train_normal_only=False)
+    test_ds = JointWindowDataset(manifest, window_store, scaler, window_size, normalize_batch, "test", train_normal_only=False)
 
     train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, drop_last=False)
     val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False, drop_last=False)
@@ -286,7 +319,17 @@ def build_joint_loaders(
     return manifest, window_store, scaler, train_ds, val_ds, test_ds, train_loader, val_loader, test_loader, input_dim
 
 
-def save_joint_manifest(run_dir: Path, manifest: pd.DataFrame, seed: int, window_size: int, step: int, features: str) -> Path:
+def save_joint_manifest(
+    run_dir: Path,
+    manifest: pd.DataFrame,
+    seed: int,
+    window_size: int,
+    step: int,
+    features: str,
+    split_method: str = "chronological",
+    purge_gap: Optional[int] = None,
+    train_normal_only: bool = True,
+) -> Path:
     split_dir = run_dir / "splits"
     split_dir.mkdir(parents=True, exist_ok=True)
     manifest_path = split_dir / f"joint_split_seed{seed}_w{window_size}_s{step}_{features}.csv"
@@ -299,6 +342,9 @@ def save_joint_manifest(run_dir: Path, manifest: pd.DataFrame, seed: int, window
             "window_size": window_size,
             "step": step,
             "features": features,
+            "split_method": split_method,
+            "purge_gap": purge_gap,
+            "train_normal_only": train_normal_only,
             "total_windows": int(len(manifest)),
             "split_counts": manifest["split"].value_counts().to_dict(),
             "ticker_split_counts": summary.to_dict(orient="records"),
