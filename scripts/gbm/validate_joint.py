@@ -17,6 +17,7 @@ from src.gbm.device import resolve_device
 from src.gbm.io import save_json
 from src.gbm.model import AnomalyTransformer
 from src.gbm.scoring import collect_joint_scores
+from src.gbm.score_dynamics import apply_score_turning_point_rule
 
 
 def main() -> None:
@@ -38,6 +39,7 @@ def main() -> None:
     parser.add_argument("--d-ff", type=int, default=256)
     parser.add_argument("--dropout", type=float, default=0.1)
     parser.add_argument("--recon-weight", type=float, default=0.25)
+    parser.add_argument("--association-weight", type=float, default=0.1)
     args = parser.parse_args()
 
     set_seed(args.seed)
@@ -76,23 +78,29 @@ def main() -> None:
     model.load_state_dict(torch.load(checkpoint_path, map_location=device))
 
     print("[validate_joint] scoring validation set", flush=True)
-    val_df = collect_joint_scores(model, val_loader, device, phase="validate", recon_weight=args.recon_weight)
+    val_df = collect_joint_scores(model, val_loader, device, phase="validate", recon_weight=args.recon_weight, association_weight=args.association_weight)
     print("[validate_joint] scoring test preview set", flush=True)
-    test_df = collect_joint_scores(model, test_loader, device, phase="test_preview", recon_weight=args.recon_weight)
+    test_df = collect_joint_scores(model, test_loader, device, phase="test_preview", recon_weight=args.recon_weight, association_weight=args.association_weight)
     if val_df.empty:
         raise RuntimeError("Validation scoring returned no rows")
 
-    threshold = float(np.quantile(val_df["score"].to_numpy(), args.threshold_quantile))
+    threshold = None
+    val_df = apply_score_turning_point_rule(val_df)
+    test_df = apply_score_turning_point_rule(test_df)
     reports_dir = run_dir / "reports"
     reports_dir.mkdir(parents=True, exist_ok=True)
     threshold_path = reports_dir / "gbm_joint_threshold.json"
     save_json(
         threshold_path,
         {
-            "threshold_quantile": args.threshold_quantile,
+            "threshold_quantile": None,
             "threshold": threshold,
+            "threshold_score_column": "score_turning_point",
+            "decision_rule": "score_turning_point_no_threshold",
             "val_score_mean": float(val_df["score"].mean()),
             "val_score_std": float(val_df["score"].std(ddof=0)),
+            "val_score_delta_abs_mean": float(val_df["score_delta_abs"].fillna(0.0).mean()),
+            "val_score_delta_abs_std": float(val_df["score_delta_abs"].fillna(0.0).std(ddof=0)),
             "val_windows": int(len(val_df)),
             "test_windows": int(len(test_df)),
             "ticker_count": int(manifest["ticker"].nunique()),

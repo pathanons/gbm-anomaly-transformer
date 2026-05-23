@@ -18,6 +18,15 @@ def gaussian_wasserstein(mu_a: torch.Tensor, sigma_a: torch.Tensor, mu_b: torch.
     return (mu_a - mu_b) ** 2 + (sigma_a - sigma_b) ** 2
 
 
-def score_windows(recon_error: torch.Tensor, nll: torch.Tensor, divergence: torch.Tensor, recon_weight: float = 0.25) -> torch.Tensor:
-    return nll + divergence + recon_weight * recon_error
-
+def score_windows(
+    recon_error: torch.Tensor,
+    nll: torch.Tensor,
+    divergence: torch.Tensor,
+    association: torch.Tensor | None = None,
+    recon_weight: float = 0.25,
+    association_weight: float = 0.1,
+) -> torch.Tensor:
+    score = nll + divergence + recon_weight * recon_error
+    if association is not None:
+        score = score + association_weight * association
+    return score

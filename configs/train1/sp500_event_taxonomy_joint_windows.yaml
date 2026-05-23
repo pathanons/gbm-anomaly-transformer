@@ -22,6 +22,7 @@ patience: 5
 dist_weight: 1.0
 recon_weight: 1.0
 divergence_weight: 0.25
+association_weight: 0.1
 threshold_quantile: 0.95
 visualize: false
 show_true_labels: false

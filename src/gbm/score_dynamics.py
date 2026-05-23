@@ -42,6 +42,42 @@ def average_precision_score_local(y_true: pd.Series, y_score: pd.Series) -> floa
     return precision_sum / positives
 
 
+
+
+def add_score_delta_columns(scores: pd.DataFrame) -> pd.DataFrame:
+    frames = []
+    for ticker, frame in scores.groupby("ticker", sort=False):
+        frame = frame.sort_values("end_date").reset_index(drop=True).copy()
+        frame["score_delta"] = frame["score"].diff()
+        frame["score_delta_abs"] = frame["score_delta"].abs()
+        frame["score_curvature"] = frame["score_delta"].diff()
+        frame["score_curvature_abs"] = frame["score_curvature"].abs()
+        frame["score_next_delta"] = frame["score"].shift(-1) - frame["score"]
+        frame["score_turning_point"] = ((frame["score_delta"] * frame["score_next_delta"]) < 0).astype(int)
+        frames.append(frame)
+    return pd.concat(frames, ignore_index=True) if frames else scores.copy()
+
+
+
+
+def apply_score_turning_point_rule(scores: pd.DataFrame) -> pd.DataFrame:
+    result = add_score_delta_columns(scores)
+    result["score_change_threshold"] = None
+    result["score_change_column"] = "score_turning_point"
+    result["score_change_pred"] = result["score_turning_point"].astype(int)
+    result["y_pred"] = result["score_change_pred"]
+    return result
+
+def apply_score_change_threshold(scores: pd.DataFrame, threshold: float, column: str = "score_curvature_abs") -> pd.DataFrame:
+    result = add_score_delta_columns(scores)
+    if column not in result.columns:
+        raise ValueError(f"Unknown score-change column: {column}")
+    result["score_change_threshold"] = float(threshold)
+    result["score_change_column"] = column
+    result["score_change_pred"] = (result[column].fillna(0.0) > threshold).astype(int)
+    result["y_pred"] = result["score_change_pred"]
+    return result
+
 def add_score_change_flags(
     scores: pd.DataFrame,
     rolling_window: int,

@@ -26,7 +26,7 @@ def parse_scalar(raw: str):
 
 def load_flat_yaml(path: Path) -> dict[str, object]:
     config: dict[str, object] = {}
-    with open(path, "r", encoding="utf-8") as handle:
+    with open(path, "r", encoding="utf-8-sig") as handle:
         for line in handle:
             stripped = line.strip()
             if not stripped or stripped.startswith("#"):

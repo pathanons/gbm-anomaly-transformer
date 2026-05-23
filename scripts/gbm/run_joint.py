@@ -77,12 +77,21 @@ def main() -> None:
     parser.add_argument("--dist-weight", type=float, default=1.0)
     parser.add_argument("--recon-weight", type=float, default=1.0)
     parser.add_argument("--divergence-weight", type=float, default=0.25)
+    parser.add_argument("--association-weight", type=float, default=0.1)
     parser.add_argument("--threshold-quantile", type=float, default=0.95)
     parser.add_argument("--visualize", action="store_true", help="Generate joint price/score charts after testing")
     parser.add_argument("--show-true-labels", action="store_true")
     parser.add_argument("--top-k", type=int, default=10)
     parser.add_argument("--full-context", action="store_true")
+    parser.add_argument("--tail-days", type=int, default=None, help="Plot only the latest N calendar days in the scored range")
     parser.add_argument("--spike-percentile", type=float, default=0.95)
+    parser.add_argument(
+        "--score-mav-windows",
+        type=int,
+        nargs="+",
+        default=[20, 50],
+        help="Moving-average window sizes applied to anomaly scores in visualization",
+    )
     parser.add_argument("--log-file", default=None, help="Optional path to write a full live pipeline log")
     parser.add_argument("--output-root", default=None, help="Root directory for generated outputs; overrides AT_OUTPUT_ROOT")
     args = parser.parse_args()
@@ -138,6 +147,8 @@ def main() -> None:
         str(args.recon_weight),
         "--divergence-weight",
         str(args.divergence_weight),
+        "--association-weight",
+        str(args.association_weight),
     ]
     eval_common = [
         "--exp-name",
@@ -168,6 +179,8 @@ def main() -> None:
         str(args.dropout),
         "--recon-weight",
         str(args.recon_weight),
+        "--association-weight",
+        str(args.association_weight),
     ]
     if args.normalize_batch:
         train_common.append("--normalize-batch")
@@ -203,11 +216,15 @@ def main() -> None:
                 str(args.top_k),
                 "--spike-percentile",
                 str(args.spike_percentile),
+                "--score-mav-windows",
+                *[str(window) for window in args.score_mav_windows],
             ]
             if args.show_true_labels:
                 visualize_cmd.append("--show-true-labels")
             if args.full_context:
                 visualize_cmd.append("--full-context")
+            if args.tail_days is not None:
+                visualize_cmd.extend(["--tail-days", str(args.tail_days)])
             run_command(visualize_cmd, log_handle)
         log("pipeline complete", log_handle)
 

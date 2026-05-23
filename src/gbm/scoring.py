@@ -7,7 +7,14 @@ import torch.nn as nn
 from src.gbm.losses import gaussian_nll, gaussian_wasserstein, score_windows
 
 
-def collect_joint_scores(model, loader, device, phase: str, recon_weight: float = 0.25) -> pd.DataFrame:
+def collect_joint_scores(
+    model,
+    loader,
+    device,
+    phase: str,
+    recon_weight: float = 0.25,
+    association_weight: float = 0.1,
+) -> pd.DataFrame:
     model.eval()
     rows = []
     criterion = nn.MSELoss(reduction="none")
@@ -17,11 +24,22 @@ def collect_joint_scores(model, loader, device, phase: str, recon_weight: float 
         for batch_idx, batch in enumerate(loader, start=1):
             x = batch["x"].to(device)
             returns = batch["returns"].to(device)
-            recon, mu, sigma, attn_maps, obs_mu, obs_sigma, latent = model(x, returns=returns, return_attention=True)
+            recon, mu, sigma, attn_maps, obs_mu, obs_sigma, latent, association = model(
+                x,
+                returns=returns,
+                return_attention=True,
+            )
             recon_error = criterion(recon, x).mean(dim=(1, 2))
             nll = gaussian_nll(returns, mu, sigma).mean(dim=1)
             divergence = gaussian_wasserstein(obs_mu, obs_sigma, mu, sigma)
-            score = score_windows(recon_error, nll, divergence, recon_weight=recon_weight)
+            score = score_windows(
+                recon_error,
+                nll,
+                divergence,
+                association=association,
+                recon_weight=recon_weight,
+                association_weight=association_weight,
+            )
 
             if batch_idx == 1 or batch_idx == batch_total or batch_idx % max(1, batch_total // 5) == 0:
                 print(f"    [{phase}] batch {batch_idx}/{batch_total} | rows={len(score)}", flush=True)
@@ -41,6 +59,7 @@ def collect_joint_scores(model, loader, device, phase: str, recon_weight: float 
                         "reconstruction_error": float(recon_error[idx].item()),
                         "nll": float(nll[idx].item()),
                         "divergence": float(divergence[idx].item()),
+                        "association_discrepancy": float(association[idx].item()) if association is not None else 0.0,
                         "score": float(score[idx].item()),
                         "mu_pred": float(mu[idx].item()),
                         "sigma_pred": float(sigma[idx].item()),

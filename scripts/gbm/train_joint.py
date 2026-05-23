@@ -15,11 +15,20 @@ import torch.nn as nn
 from src.gbm.data import build_joint_loaders, discover_tickers, get_run_dir, save_joint_manifest, set_seed
 from src.gbm.device import resolve_device
 from src.gbm.io import save_json
-from src.gbm.losses import gaussian_nll, gaussian_wasserstein, score_windows
+from src.gbm.losses import gaussian_nll, gaussian_wasserstein
 from src.gbm.model import AnomalyTransformer
 
 
-def run_epoch(model, loader, device, optimizer=None, dist_weight=1.0, recon_weight=1.0, divergence_weight=0.25):
+def run_epoch(
+    model,
+    loader,
+    device,
+    optimizer=None,
+    dist_weight=1.0,
+    recon_weight=1.0,
+    divergence_weight=0.25,
+    association_weight=0.1,
+):
     is_train = optimizer is not None
     model.train(is_train)
     total_loss = 0.0
@@ -33,16 +42,23 @@ def run_epoch(model, loader, device, optimizer=None, dist_weight=1.0, recon_weig
         for batch_idx, batch in enumerate(loader, start=1):
             x = batch["x"].to(device)
             returns = batch["returns"].to(device)
-            recon, mu, sigma, obs_mu, obs_sigma = model(x, returns=returns)
+            recon, mu, sigma, obs_mu, obs_sigma, association = model(x, returns=returns)
             recon_error = criterion(recon, x)
             nll = gaussian_nll(returns, mu, sigma).mean()
             divergence = gaussian_wasserstein(obs_mu, obs_sigma, mu, sigma).mean()
-            loss = recon_weight * recon_error + dist_weight * nll + divergence_weight * divergence
+            association_loss = association.mean() if association is not None else torch.zeros((), device=device)
+            loss = (
+                recon_weight * recon_error
+                + dist_weight * nll
+                + divergence_weight * divergence
+                + association_weight * association_loss
+            )
 
             if batch_idx == 1 or batch_idx == batch_total or batch_idx % max(1, batch_total // 5) == 0:
                 print(
                     f"    [{phase}] batch {batch_idx}/{batch_total} | loss={float(loss.item()):.6f} "
-                    f"| recon={float(recon_error.item()):.6f} | nll={float(nll.item()):.6f} | div={float(divergence.item()):.6f}",
+                    f"| recon={float(recon_error.item()):.6f} | nll={float(nll.item()):.6f} "
+                    f"| div={float(divergence.item()):.6f} | assoc={float(association_loss.item()):.6f}",
                     flush=True,
                 )
 
@@ -79,6 +95,7 @@ def main() -> None:
     parser.add_argument("--dist-weight", type=float, default=1.0)
     parser.add_argument("--recon-weight", type=float, default=1.0)
     parser.add_argument("--divergence-weight", type=float, default=0.25)
+    parser.add_argument("--association-weight", type=float, default=0.1)
     args = parser.parse_args()
 
     set_seed(args.seed)
@@ -135,6 +152,7 @@ def main() -> None:
             dist_weight=args.dist_weight,
             recon_weight=args.recon_weight,
             divergence_weight=args.divergence_weight,
+            association_weight=args.association_weight,
         )
         val_loss = run_epoch(
             model,
@@ -144,6 +162,7 @@ def main() -> None:
             dist_weight=args.dist_weight,
             recon_weight=args.recon_weight,
             divergence_weight=args.divergence_weight,
+            association_weight=args.association_weight,
         )
         history.append({"epoch": epoch + 1, "train_loss": train_loss, "val_loss": val_loss})
         print(f"Epoch {epoch + 1:03d}/{args.epochs} | train={train_loss:.6f} | val={val_loss:.6f}")

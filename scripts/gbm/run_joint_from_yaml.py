@@ -26,7 +26,7 @@ def parse_scalar(raw: str):
 
 def load_flat_yaml(path: Path) -> dict[str, object]:
     config: dict[str, object] = {}
-    with open(path, "r", encoding="utf-8") as handle:
+    with open(path, "r", encoding="utf-8-sig") as handle:
         for line in handle:
             stripped = line.strip()
             if not stripped or stripped.startswith("#"):
@@ -41,7 +41,7 @@ def load_flat_yaml(path: Path) -> dict[str, object]:
                     config[key] = "all"
                 else:
                     config[key] = [item.strip() for item in value_text.split(",") if item.strip()]
-            elif key == "window_size" and "," in value_text:
+            elif key in {"window_size", "score_mav_windows"} and "," in value_text:
                 config[key] = [int(item.strip()) for item in value_text.split(",") if item.strip()]
             else:
                 config[key] = parse_scalar(value_text)
@@ -123,9 +123,17 @@ def main() -> None:
         add_option("--dist-weight", config.get("dist_weight", 1.0))
         add_option("--recon-weight", config.get("recon_weight", 1.0))
         add_option("--divergence-weight", config.get("divergence_weight", 0.25))
+        add_option("--association-weight", config.get("association_weight", 0.1))
         add_option("--threshold-quantile", config.get("threshold_quantile", 0.95))
         add_option("--top-k", config.get("top_k", 10))
         add_option("--spike-percentile", config.get("spike_percentile", 0.95))
+        add_option("--tail-days", config.get("tail_days"))
+        score_mav_windows = config.get("score_mav_windows")
+        if isinstance(score_mav_windows, list):
+            command.append("--score-mav-windows")
+            command.extend([str(window) for window in score_mav_windows])
+        else:
+            add_option("--score-mav-windows", score_mav_windows)
 
         if as_bool(config.get("normalize_batch")):
             command.append("--normalize-batch")
