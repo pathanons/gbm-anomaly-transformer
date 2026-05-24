@@ -1,0 +1,21 @@
+# Evaluation-only decision sweep.
+# Requires a trained checkpoint in:
+# D:\AnomalyTransformerRuns\experiments\review_canonical_price_studentt_conformal\models\gbm_joint.pt
+
+checkpoint_exp_name: review_canonical_price_studentt_conformal
+sweep_name: review_canonical_price_studentt_decision_sweep
+output_root: D:\AnomalyTransformerRuns
+python: C:\Users\Acer\anaconda3\python.exe
+data_path: datasets/SP500_event_taxonomy_w100
+device: auto
+features: price_only
+window_size: 100
+step: 1
+seed: 42
+batch_size: 32
+predictive_distribution: student_t
+association_mode: canonical_gbm
+threshold_methods: conformal,per_ticker_conformal,evt,tail_probability,var
+threshold_quantiles: 0.90,0.95,0.975,0.99
+evt_tail_quantiles: 0.85,0.90,0.95
+tolerance_windows: 3

@@ -7,6 +7,44 @@ import torch.nn as nn
 from src.gbm.losses import gaussian_wasserstein, predictive_nll, predictive_std, score_windows
 
 
+def standard_normal_cdf(z: torch.Tensor) -> torch.Tensor:
+    return 0.5 * (1.0 + torch.erf(z / torch.sqrt(torch.tensor(2.0, dtype=z.dtype, device=z.device))))
+
+
+def predictive_tail_probabilities(
+    returns: torch.Tensor,
+    mu: torch.Tensor,
+    sigma: torch.Tensor,
+    nu: torch.Tensor | None,
+    distribution: str,
+) -> torch.Tensor:
+    sigma = torch.clamp(sigma, min=1e-4)
+    z = (returns - mu.unsqueeze(-1)) / sigma.unsqueeze(-1)
+    if distribution == "gaussian":
+        cdf = standard_normal_cdf(z)
+        two_sided = 2.0 * torch.minimum(cdf, 1.0 - cdf)
+        return torch.clamp(two_sided, min=1e-12, max=1.0).min(dim=1).values
+    if distribution == "student_t":
+        if nu is None:
+            raise ValueError("Student-t tail probabilities require nu")
+        try:
+            from scipy.stats import t as student_t
+
+            z_np = z.detach().cpu().numpy()
+            nu_np = torch.clamp(nu, min=2.1).detach().cpu().numpy()
+            cdf_np = student_t.cdf(z_np, df=nu_np[:, None])
+            cdf = torch.as_tensor(cdf_np, dtype=returns.dtype, device=returns.device)
+            two_sided = 2.0 * torch.minimum(cdf, 1.0 - cdf)
+            return torch.clamp(two_sided, min=1e-12, max=1.0).min(dim=1).values
+        except Exception:
+            pred_std = predictive_std(sigma, nu, distribution=distribution)
+            z_std = (returns - mu.unsqueeze(-1)) / pred_std.unsqueeze(-1)
+            cdf = standard_normal_cdf(z_std)
+            two_sided = 2.0 * torch.minimum(cdf, 1.0 - cdf)
+            return torch.clamp(two_sided, min=1e-12, max=1.0).min(dim=1).values
+    raise ValueError("distribution must be gaussian or student_t")
+
+
 def collect_joint_scores(
     model,
     loader,
@@ -38,6 +76,13 @@ def collect_joint_scores(
             nll = predictive_nll(returns, mu, sigma, nu, distribution=predictive_distribution).mean(dim=1)
             pred_std = predictive_std(sigma, nu, distribution=predictive_distribution)
             divergence = gaussian_wasserstein(obs_mu, obs_sigma, mu, pred_std)
+            tail_probability = predictive_tail_probabilities(
+                returns,
+                mu,
+                sigma,
+                nu,
+                distribution=predictive_distribution,
+            )
             score = score_windows(
                 recon_error,
                 nll,
@@ -76,6 +121,8 @@ def collect_joint_scores(
                         "mu_obs": float(obs_mu[idx].item()),
                         "sigma_obs": float(obs_sigma[idx].item()),
                         "tail_z_abs": float((torch.abs(returns[idx] - mu[idx]) / pred_std[idx]).max().item()),
+                        "tail_probability": float(tail_probability[idx].item()),
+                        "tail_surprise": float((-torch.log10(tail_probability[idx])).item()),
                     }
                 )
 

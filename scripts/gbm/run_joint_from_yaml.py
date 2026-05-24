@@ -130,6 +130,7 @@ def main() -> None:
         add_option("--association-weight", config.get("association_weight", 0.1))
         add_option("--threshold-quantile", config.get("threshold_quantile", 0.95))
         add_option("--threshold-method", config.get("threshold_method", "quantile"))
+        add_option("--evt-tail-quantile", config.get("evt_tail_quantile", 0.90))
         add_option("--tolerance-windows", config.get("tolerance_windows", 3))
         add_option("--top-k", config.get("top_k", 10))
         add_option("--spike-percentile", config.get("spike_percentile", 0.95))

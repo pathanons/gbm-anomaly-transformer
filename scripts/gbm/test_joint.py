@@ -13,6 +13,7 @@ os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
 import pandas as pd
 import torch
 
+from src.gbm.calibration import add_conformal_p_values, add_per_ticker_conformal_p_values
 from src.gbm.data import build_joint_loaders, discover_tickers, get_run_dir, set_seed
 from src.gbm.device import resolve_device
 from src.gbm.io import save_json
@@ -49,6 +50,7 @@ def main() -> None:
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--exp-name", default="experiment3_joint")
+    parser.add_argument("--checkpoint-exp-name", default=None, help="Optional source experiment to load the checkpoint from")
     parser.add_argument("--device", default="auto", help="auto, cuda, mps, or cpu")
     parser.add_argument("--d-model", type=int, default=128)
     parser.add_argument("--n-heads", type=int, default=4)
@@ -72,7 +74,8 @@ def main() -> None:
     device = resolve_device(args.device)
     print(f"[test_joint] device={device}", flush=True)
     run_dir = get_run_dir(args.exp_name)
-    checkpoint_path = run_dir / "models" / "gbm_joint.pt"
+    checkpoint_run_dir = get_run_dir(args.checkpoint_exp_name) if args.checkpoint_exp_name else run_dir
+    checkpoint_path = checkpoint_run_dir / "models" / "gbm_joint.pt"
     threshold_path = run_dir / "reports" / "gbm_joint_threshold.json"
     if not checkpoint_path.exists():
         raise FileNotFoundError(f"Missing checkpoint: {checkpoint_path}")
@@ -149,13 +152,23 @@ def main() -> None:
         calibration_scores = threshold_info.get("calibration_scores")
         if not calibration_scores:
             raise RuntimeError("Missing conformal calibration scores")
-        calibration = pd.Series(calibration_scores, dtype=float)
-        test_df["conformal_p_value"] = test_df["score"].apply(
-            lambda score: (float((calibration >= score).sum()) + 1.0) / (len(calibration) + 1.0)
-        )
+        per_ticker_calibration_scores = threshold_info.get("per_ticker_calibration_scores")
+        if threshold_method == "per_ticker_conformal" or threshold_info.get("decision_rule") == "per_ticker_conformal_p_value_lt_alpha":
+            test_df = add_per_ticker_conformal_p_values(
+                test_df,
+                per_ticker_calibration_scores or {},
+                pd.Series(calibration_scores, dtype=float).to_numpy(),
+            )
+        else:
+            test_df = add_conformal_p_values(test_df, pd.Series(calibration_scores, dtype=float).to_numpy())
         conformal_alpha = float(threshold_info.get("conformal_alpha", 1.0 - threshold_info.get("threshold_quantile", 0.95)))
         test_df["y_pred"] = (test_df["conformal_p_value"] < conformal_alpha).astype(int)
         metric_scores = -test_df["conformal_p_value"]
+        metric_threshold = -conformal_alpha
+    elif threshold_score_column == "tail_probability":
+        conformal_alpha = float(threshold_info.get("conformal_alpha", threshold))
+        test_df["y_pred"] = (test_df["tail_probability"] < conformal_alpha).astype(int)
+        metric_scores = -test_df["tail_probability"]
         metric_threshold = -conformal_alpha
     elif threshold_score_column == "score_turning_point":
         test_df = apply_score_turning_point_rule(test_df)
@@ -186,6 +199,7 @@ def main() -> None:
             "threshold_score_column": threshold_score_column,
             "decision_rule": threshold_info.get("decision_rule", "score_gt_validation_quantile"),
             "threshold_method": threshold_method,
+            "conformal_alpha": threshold_info.get("conformal_alpha"),
             "predictive_distribution": args.predictive_distribution,
             "association_mode": args.association_mode,
             "n_windows": int(len(test_df)),
@@ -217,6 +231,8 @@ def main() -> None:
     for ticker, frame in test_df.groupby("ticker"):
         if threshold_score_column == "conformal_p_value" and "conformal_p_value" in frame:
             ticker_scores = (-frame["conformal_p_value"]).tolist()
+        elif threshold_score_column == "tail_probability" and "tail_probability" in frame:
+            ticker_scores = (-frame["tail_probability"]).tolist()
         else:
             score_column = threshold_score_column if threshold_score_column in frame else "score"
             ticker_scores = frame[score_column].fillna(0.0).tolist()
