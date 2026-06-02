@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import argparse
-import json
 import os
 import sys
 from pathlib import Path
@@ -16,13 +15,29 @@ import torch
 from src.gbm.data import build_joint_loaders, discover_tickers, get_run_dir, set_seed
 from src.gbm.device import resolve_device
 from src.gbm.io import save_json
-from src.gbm.metrics import binary_metrics
 from src.gbm.vanilla_anomaly_transformer import VanillaAnomalyTransformer
 from scripts.gbm.validate_vanilla_joint import collect_scores
 
 
+def score_summary(frame: pd.DataFrame, prefix: str = "") -> dict[str, float | int]:
+    score = frame["score"].astype(float)
+    y_true = frame["y_true"].astype(int)
+    return {
+        f"{prefix}n_windows": int(len(frame)),
+        f"{prefix}anomaly_rate": float(y_true.mean()) if len(frame) else 0.0,
+        f"{prefix}score_mean": float(score.mean()) if len(frame) else float("nan"),
+        f"{prefix}score_std": float(score.std(ddof=0)) if len(frame) else float("nan"),
+        f"{prefix}score_min": float(score.min()) if len(frame) else float("nan"),
+        f"{prefix}score_max": float(score.max()) if len(frame) else float("nan"),
+        f"{prefix}score_p50": float(score.quantile(0.50)) if len(frame) else float("nan"),
+        f"{prefix}score_p90": float(score.quantile(0.90)) if len(frame) else float("nan"),
+        f"{prefix}score_p95": float(score.quantile(0.95)) if len(frame) else float("nan"),
+        f"{prefix}score_p99": float(score.quantile(0.99)) if len(frame) else float("nan"),
+    }
+
+
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Test the vanilla Anomaly Transformer")
+    parser = argparse.ArgumentParser(description="Test the vanilla Anomaly Transformer and save raw scores")
     parser.add_argument("--data-path", default="datasets/SP500_event_taxonomy_w100")
     parser.add_argument("--tickers", nargs="*", default=None, help="Optional explicit ticker list")
     parser.add_argument("--window-size", type=int, default=100)
@@ -47,18 +62,10 @@ def main() -> None:
     print(f"[test_vanilla_joint] device={device}", flush=True)
     run_dir = get_run_dir(args.exp_name)
     checkpoint_path = run_dir / "models" / "vanilla_joint.pt"
-    threshold_path = run_dir / "reports" / "vanilla_joint_threshold.json"
     if not checkpoint_path.exists():
         raise FileNotFoundError(f"Missing checkpoint: {checkpoint_path}")
-    if not threshold_path.exists():
-        raise FileNotFoundError(f"Missing validation threshold file: {threshold_path}")
 
     print(f"[test_vanilla_joint] loading checkpoint={checkpoint_path}")
-    print(f"[test_vanilla_joint] loading threshold={threshold_path}")
-
-    with open(threshold_path, "r", encoding="utf-8") as handle:
-        threshold_info = json.load(handle)
-    threshold = float(threshold_info["threshold"])
 
     manifest, window_store, scaler, train_ds, val_ds, test_ds, train_loader, val_loader, test_loader, input_dim = build_joint_loaders(
         data_path=args.data_path,
@@ -91,40 +98,37 @@ def main() -> None:
     if test_df.empty:
         raise RuntimeError("Test scoring returned no rows")
 
-    test_df["y_pred"] = (test_df["score"] > threshold).astype(int)
-    metrics = binary_metrics(test_df["y_true"].tolist(), test_df["score"].tolist(), threshold)
+    metrics = score_summary(test_df)
     metrics.update(
         {
-            "threshold": threshold,
-            "n_windows": int(len(test_df)),
+            "prior_type": args.prior_type,
+            "temperature": args.temperature,
             "ticker_count": int(manifest["ticker"].nunique()),
-            "anomaly_rate": float(test_df["y_true"].mean()),
-            "mean_score": float(test_df["score"].mean()),
-            "std_score": float(test_df["score"].std(ddof=0)),
+            "mean_reconstruction_error": float(test_df["reconstruction_error"].mean()),
+            "mean_series_loss": float(test_df["series_loss"].mean()),
+            "mean_prior_loss": float(test_df["prior_loss"].mean()),
         }
     )
 
     reports_dir = run_dir / "reports"
     reports_dir.mkdir(parents=True, exist_ok=True)
     scores_path = reports_dir / "vanilla_joint_test_scores.csv"
-    metrics_path = reports_dir / "vanilla_joint_metrics.json"
+    metrics_path = reports_dir / "vanilla_joint_score_metrics.json"
     test_df.to_csv(scores_path, index=False)
     save_json(metrics_path, metrics)
 
     by_ticker_dir = reports_dir / "by_ticker"
     by_ticker_dir.mkdir(parents=True, exist_ok=True)
+    ticker_rows = []
     for ticker, group in test_df.groupby("ticker"):
         group.to_csv(by_ticker_dir / f"vanilla_joint_{ticker}_test_scores.csv", index=False)
+        row = {"ticker": ticker}
+        row.update(score_summary(group))
+        ticker_rows.append(row)
+    pd.DataFrame(ticker_rows).to_csv(reports_dir / "vanilla_joint_score_metrics_by_ticker.csv", index=False)
 
-    ticker_summary = (
-        test_df.groupby("ticker")
-        .apply(lambda frame: pd.Series(binary_metrics(frame["y_true"].tolist(), frame["score"].tolist(), threshold)))
-        .reset_index()
-    )
-    ticker_summary.to_csv(reports_dir / "vanilla_joint_metrics_by_ticker.csv", index=False)
-    print(f"Saved scores to {scores_path}")
-    print(f"Saved metrics to {metrics_path}")
-    print(f"Saved per-ticker scores to {by_ticker_dir}")
+    print(f"Saved raw test scores to {scores_path}")
+    print(f"Saved raw score metrics to {metrics_path}")
 
 
 if __name__ == "__main__":

@@ -47,12 +47,35 @@ def interval_end(dates, end_date):
     return date_list[end_idx]
 
 
+def select_tickers(scores_df: pd.DataFrame, top_k: int | None, tickers: list[str] | None) -> list[str]:
+    available = set(scores_df["ticker"].astype(str).unique())
+    if tickers:
+        selected = [ticker for ticker in tickers if ticker in available]
+        missing = sorted(set(tickers) - available)
+        if missing:
+            print(f"[visualize_joint] missing requested tickers in scores: {', '.join(missing)}")
+        return selected
+
+    grouped = []
+    for ticker, ticker_df in scores_df.groupby("ticker"):
+        positive_windows = int(ticker_df.get("y_true", pd.Series(0, index=ticker_df.index)).fillna(0).sum())
+        max_score = float(ticker_df["score"].max())
+        grouped.append((str(ticker), positive_windows, max_score))
+    grouped.sort(key=lambda row: (row[1], row[2]), reverse=True)
+    selected = [row[0] for row in grouped]
+    if top_k is not None and top_k > 0:
+        selected = selected[:top_k]
+    return selected
+
+
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Plot joint EXP3 anomaly charts per ticker")
+    parser = argparse.ArgumentParser(description="Plot raw joint model score charts per ticker")
     parser.add_argument("--exp-name", default="experiment3_joint")
+    parser.add_argument("--output-root", default=None, help="Output root containing experiments/<exp-name>; defaults to AT_OUTPUT_ROOT or results")
     parser.add_argument("--data-path", default="datasets/SP500_event_taxonomy_w100")
     parser.add_argument("--output-dir", default=None)
     parser.add_argument("--scores-file", default=None, help="Optional score CSV override; defaults to reports/gbm_joint_test_scores.csv")
+    parser.add_argument("--ticker", nargs="+", default=None, help="Plot only these tickers")
     parser.add_argument("--show-true-labels", action="store_true")
     parser.add_argument("--top-k", type=int, default=10)
     parser.add_argument("--full-context", action="store_true")
@@ -71,21 +94,26 @@ def main() -> None:
     if any(window <= 0 for window in mav_windows):
         raise ValueError("--score-mav-windows values must be positive integers")
 
-    run_dir = get_run_dir(args.exp_name)
+    run_dir = get_run_dir(args.exp_name, args.output_root)
     scores_path = Path(args.scores_file) if args.scores_file else run_dir / "reports" / "gbm_joint_test_scores.csv"
     if not scores_path.exists():
         raise FileNotFoundError(f"Missing joint test scores file: {scores_path}")
 
     scores_df = pd.read_csv(scores_path, parse_dates=["start_date", "end_date"])
 
-    output_dir = Path(args.output_dir) if args.output_dir else run_dir / "visualizations"
+    output_dir = Path(args.output_dir) if args.output_dir else run_dir / "visualizations_raw_score"
     output_dir.mkdir(parents=True, exist_ok=True)
+
+    selected_tickers = select_tickers(scores_df, args.top_k, args.ticker)
+    if not selected_tickers:
+        raise ValueError("No tickers selected for visualization")
 
     print(f"[visualize_joint] loading scores={scores_path}")
     print(f"[visualize_joint] tickers={scores_df['ticker'].nunique()} | rows={len(scores_df)} | output_dir={output_dir}")
 
-    for ticker_idx, (ticker, score_df) in enumerate(scores_df.groupby("ticker"), start=1):
-        print(f"[visualize_joint] ticker {ticker_idx}/{scores_df['ticker'].nunique()} -> {ticker} | windows={len(score_df)}", flush=True)
+    for ticker_idx, ticker in enumerate(selected_tickers, start=1):
+        score_df = scores_df[scores_df["ticker"].astype(str) == ticker].copy()
+        print(f"[visualize_joint] ticker {ticker_idx}/{len(selected_tickers)} -> {ticker} | windows={len(score_df)}", flush=True)
         ohlcv_path = Path(args.data_path) / f"{ticker}_ohlcv.csv"
         label_path = Path(args.data_path) / f"{ticker}_anomaly_label.csv"
         if not ohlcv_path.exists():
@@ -126,10 +154,21 @@ def main() -> None:
         )
         ax_price.plot(price_df["Date"], price_df["Close"], color="#111111", linewidth=1.3, label="Close")
         ax_price.set_ylabel("Close")
-        ax_price.set_title(f"{ticker} | joint EXP3 raw price, score, and score MAV chart")
+        ax_price.set_title(f"{ticker} | raw price, model score, and score moving averages")
         ax_price.grid(True, alpha=0.25)
+        ax_price.legend(loc="upper left")
 
-        ax_score.plot(score_df["end_date"], score_df["score"], color="#1f77b4", linewidth=1.0, label="Anomaly score")
+        ax_score.plot(score_df["end_date"], score_df["score"], color="#1f77b4", linewidth=1.0, label="Raw model score")
+        spike_threshold = score_df["score"].quantile(args.spike_percentile)
+        spike_mask = score_df["score"] >= spike_threshold
+        ax_score.scatter(
+            score_df.loc[spike_mask, "end_date"],
+            score_df.loc[spike_mask, "score"],
+            s=10,
+            color="#d62728",
+            alpha=0.75,
+            label=f"top {100 * (1 - args.spike_percentile):.1f}% scores",
+        )
         ax_score.set_ylabel("Score")
         ax_score.grid(True, alpha=0.25)
         ax_score.legend(loc="upper left")
@@ -157,12 +196,16 @@ def main() -> None:
                 label_df = label_df[(label_df["Date"] >= plot_start) & (label_df["Date"] <= plot_end)].copy()
                 true_mask = (label_df[label_columns].fillna(0) > 0).any(axis=1)
                 true_intervals = contiguous_intervals(label_df["Date"], true_mask)
+                shown = False
                 for start_date, end_date in true_intervals:
                     span_end = interval_end(price_df["Date"], end_date)
-                    ax_price.axvspan(start_date, span_end, color="#2ca02c", alpha=0.10)
+                    ax_price.axvspan(start_date, span_end, color="#2ca02c", alpha=0.08, label="Event label" if not shown else None)
+                    shown = True
+                if shown:
+                    ax_price.legend(loc="upper left")
 
         fig.tight_layout()
-        out_path = output_dir / f"{ticker}_joint_anomaly_price_chart.png"
+        out_path = output_dir / f"{ticker}_raw_score_price_chart.png"
         fig.savefig(out_path, dpi=170, bbox_inches="tight")
         plt.close(fig)
         print(f"Saved visualization to {out_path}")

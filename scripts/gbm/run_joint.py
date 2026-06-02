@@ -87,14 +87,6 @@ def main() -> None:
     parser.add_argument("--recon-weight", type=float, default=1.0)
     parser.add_argument("--divergence-weight", type=float, default=0.25)
     parser.add_argument("--association-weight", type=float, default=0.1)
-    parser.add_argument("--threshold-quantile", type=float, default=0.95)
-    parser.add_argument(
-        "--threshold-method",
-        default="quantile",
-        choices=["quantile", "conformal", "per_ticker_conformal", "evt", "tail_probability", "var"],
-    )
-    parser.add_argument("--evt-tail-quantile", type=float, default=0.90)
-    parser.add_argument("--tolerance-windows", type=int, default=3)
     parser.add_argument("--visualize", action="store_true", help="Generate joint price/score charts after testing")
     parser.add_argument("--show-true-labels", action="store_true")
     parser.add_argument("--top-k", type=int, default=10)
@@ -243,12 +235,6 @@ def main() -> None:
                 "-u",
                 "scripts/gbm/validate_joint.py",
                 *eval_common,
-                "--threshold-quantile",
-                str(args.threshold_quantile),
-                "--threshold-method",
-                args.threshold_method,
-                "--evt-tail-quantile",
-                str(args.evt_tail_quantile),
                 "--tickers",
                 *tickers,
             ],
@@ -261,8 +247,6 @@ def main() -> None:
                 "-u",
                 "scripts/gbm/test_joint.py",
                 *eval_common,
-                "--tolerance-windows",
-                str(args.tolerance_windows),
                 "--tickers",
                 *tickers,
             ],

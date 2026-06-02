@@ -11,15 +11,6 @@ os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
 
 import torch
 
-from src.gbm.calibration import (
-    add_conformal_p_values,
-    add_per_ticker_conformal_p_values,
-    calibration_scores_by_ticker,
-    empirical_threshold,
-    evt_fit_to_json,
-    fit_evt_threshold,
-    normal_calibration_subset,
-)
 from src.gbm.data import build_joint_loaders, discover_tickers, get_run_dir, set_seed
 from src.gbm.device import resolve_device
 from src.gbm.io import save_json
@@ -50,7 +41,6 @@ def main() -> None:
     parser.add_argument("--exp-name", default="experiment3_joint")
     parser.add_argument("--checkpoint-exp-name", default=None, help="Optional source experiment to load the checkpoint from")
     parser.add_argument("--device", default="auto", help="auto, cuda, mps, or cpu")
-    parser.add_argument("--threshold-quantile", type=float, default=0.95)
     parser.add_argument("--d-model", type=int, default=128)
     parser.add_argument("--n-heads", type=int, default=4)
     parser.add_argument("--e-layers", type=int, default=3)
@@ -62,12 +52,6 @@ def main() -> None:
         default="gaussian_log_return",
         choices=["gaussian_log_return", "canonical_gbm", "temporal", "none"],
     )
-    parser.add_argument(
-        "--threshold-method",
-        default="quantile",
-        choices=["quantile", "conformal", "per_ticker_conformal", "evt", "tail_probability", "var"],
-    )
-    parser.add_argument("--evt-tail-quantile", type=float, default=0.90)
     parser.add_argument("--dist-weight", type=float, default=1.0)
     parser.add_argument("--recon-weight", type=float, default=1.0)
     parser.add_argument("--divergence-weight", type=float, default=0.25)
@@ -142,72 +126,11 @@ def main() -> None:
     if val_df.empty:
         raise RuntimeError("Validation scoring returned no rows")
 
-    calibration_df, threshold_fit_subset = normal_calibration_subset(val_df, score_column="score")
-    calibration_scores = calibration_df["score"].astype(float).to_numpy()
-    threshold = empirical_threshold(calibration_scores, args.threshold_quantile)
-    threshold_score_column = "score"
-    decision_rule = "score_gt_validation_normal_quantile"
-    conformal_alpha = None
-    per_ticker_calibration_scores = None
-    evt_fit = None
-
-    val_df = add_conformal_p_values(val_df, calibration_scores)
-    test_df = add_conformal_p_values(test_df, calibration_scores)
-
-    if args.threshold_method == "conformal":
-        conformal_alpha = 1.0 - args.threshold_quantile
-        val_df["y_pred"] = (val_df["conformal_p_value"] < conformal_alpha).astype(int)
-        test_df["y_pred"] = (test_df["conformal_p_value"] < conformal_alpha).astype(int)
-        threshold_score_column = "conformal_p_value"
-        decision_rule = "conformal_p_value_lt_alpha"
-    elif args.threshold_method == "per_ticker_conformal":
-        conformal_alpha = 1.0 - args.threshold_quantile
-        per_ticker_calibration_scores = calibration_scores_by_ticker(calibration_df, score_column="score")
-        val_df = add_per_ticker_conformal_p_values(val_df, per_ticker_calibration_scores, calibration_scores)
-        test_df = add_per_ticker_conformal_p_values(test_df, per_ticker_calibration_scores, calibration_scores)
-        val_df["y_pred"] = (val_df["conformal_p_value"] < conformal_alpha).astype(int)
-        test_df["y_pred"] = (test_df["conformal_p_value"] < conformal_alpha).astype(int)
-        threshold_score_column = "conformal_p_value"
-        decision_rule = "per_ticker_conformal_p_value_lt_alpha"
-    elif args.threshold_method == "evt":
-        evt_fit = fit_evt_threshold(
-            calibration_scores,
-            target_quantile=args.threshold_quantile,
-            tail_base_quantile=args.evt_tail_quantile,
-        )
-        threshold = evt_fit.threshold
-        val_df["y_pred"] = (val_df["score"] > threshold).astype(int)
-        test_df["y_pred"] = (test_df["score"] > threshold).astype(int)
-        threshold_score_column = "score"
-        decision_rule = "score_gt_evt_gpd_quantile"
-    elif args.threshold_method in {"tail_probability", "var"}:
-        conformal_alpha = 1.0 - args.threshold_quantile
-        threshold = conformal_alpha
-        val_df["y_pred"] = (val_df["tail_probability"] < conformal_alpha).astype(int)
-        test_df["y_pred"] = (test_df["tail_probability"] < conformal_alpha).astype(int)
-        threshold_score_column = "tail_probability"
-        decision_rule = "tail_probability_lt_alpha" if args.threshold_method == "tail_probability" else "var_breach_tail_probability_lt_alpha"
-    else:
-        val_df["y_pred"] = (val_df["score"] > threshold).astype(int)
-        test_df["y_pred"] = (test_df["score"] > threshold).astype(int)
-
     reports_dir = run_dir / "reports"
     reports_dir.mkdir(parents=True, exist_ok=True)
-    threshold_path = reports_dir / "gbm_joint_threshold.json"
     save_json(
-        threshold_path,
+        reports_dir / "gbm_joint_score_summary.json",
         {
-            "threshold_quantile": args.threshold_quantile,
-            "threshold": threshold,
-            "threshold_score_column": threshold_score_column,
-            "decision_rule": decision_rule,
-            "threshold_method": args.threshold_method,
-            "conformal_alpha": conformal_alpha,
-            "calibration_scores": [float(score) for score in calibration_scores.tolist()],
-            "per_ticker_calibration_scores": per_ticker_calibration_scores,
-            "evt": evt_fit_to_json(evt_fit) if evt_fit is not None else None,
-            "evt_tail_quantile": args.evt_tail_quantile,
-            "threshold_fit_subset": threshold_fit_subset,
             "dist_weight": args.dist_weight,
             "recon_weight": args.recon_weight,
             "divergence_weight": args.divergence_weight,
@@ -216,8 +139,14 @@ def main() -> None:
             "association_mode": args.association_mode,
             "val_score_mean": float(val_df["score"].mean()),
             "val_score_std": float(val_df["score"].std(ddof=0)),
+            "val_score_min": float(val_df["score"].min()),
+            "val_score_max": float(val_df["score"].max()),
+            "test_preview_score_mean": float(test_df["score"].mean()),
+            "test_preview_score_std": float(test_df["score"].std(ddof=0)),
+            "test_preview_score_min": float(test_df["score"].min()),
+            "test_preview_score_max": float(test_df["score"].max()),
             "val_windows": int(len(val_df)),
-            "test_windows": int(len(test_df)),
+            "test_preview_windows": int(len(test_df)),
             "ticker_count": int(manifest["ticker"].nunique()),
             "split_counts": manifest["split"].value_counts().to_dict(),
         },
@@ -225,8 +154,8 @@ def main() -> None:
 
     val_df.to_csv(reports_dir / "gbm_joint_validation_scores.csv", index=False)
     test_df.to_csv(reports_dir / "gbm_joint_test_scores_preview.csv", index=False)
-    print(f"Saved threshold to {threshold_path}")
-    print(f"Validation windows: {len(val_df)} | Test windows: {len(test_df)}")
+    print(f"Saved raw score summary to {reports_dir / 'gbm_joint_score_summary.json'}")
+    print(f"Validation windows: {len(val_df)} | Test preview windows: {len(test_df)}")
 
 
 if __name__ == "__main__":

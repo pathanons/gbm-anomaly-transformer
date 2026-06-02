@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import argparse
-import json
 import os
 import sys
 from pathlib import Path
@@ -13,20 +12,12 @@ os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
 import pandas as pd
 import torch
 
-from src.gbm.calibration import add_conformal_p_values, add_per_ticker_conformal_p_values
 from src.gbm.data import build_joint_loaders, discover_tickers, get_run_dir, set_seed
 from src.gbm.device import resolve_device
 from src.gbm.io import save_json
-from src.gbm.metrics import binary_metrics
 from src.gbm.model import AnomalyTransformer
+from src.gbm.score_dynamics import add_test_event_columns, average_precision_score_local, roc_auc_score_local
 from src.gbm.scoring import collect_joint_scores
-from src.gbm.score_dynamics import (
-    add_test_event_columns,
-    apply_score_change_threshold,
-    apply_score_turning_point_rule,
-    summarize_by_event_type,
-    tolerance_metrics,
-)
 
 
 def load_state_dict(path: Path, device):
@@ -36,8 +27,65 @@ def load_state_dict(path: Path, device):
         return torch.load(path, map_location=device)
 
 
+def score_summary(frame: pd.DataFrame, prefix: str = "") -> dict[str, float | int]:
+    score = frame["score"].astype(float)
+    y_true = frame["y_true"].astype(int)
+    output: dict[str, float | int] = {
+        f"{prefix}n_windows": int(len(frame)),
+        f"{prefix}anomaly_rate": float(y_true.mean()) if len(frame) else 0.0,
+        f"{prefix}score_mean": float(score.mean()) if len(frame) else float("nan"),
+        f"{prefix}score_std": float(score.std(ddof=0)) if len(frame) else float("nan"),
+        f"{prefix}score_min": float(score.min()) if len(frame) else float("nan"),
+        f"{prefix}score_max": float(score.max()) if len(frame) else float("nan"),
+        f"{prefix}score_p50": float(score.quantile(0.50)) if len(frame) else float("nan"),
+        f"{prefix}score_p90": float(score.quantile(0.90)) if len(frame) else float("nan"),
+        f"{prefix}score_p95": float(score.quantile(0.95)) if len(frame) else float("nan"),
+        f"{prefix}score_p99": float(score.quantile(0.99)) if len(frame) else float("nan"),
+    }
+    if y_true.nunique() >= 2:
+        output[f"{prefix}roc_auc_from_score"] = float(roc_auc_score_local(y_true, score))
+        output[f"{prefix}pr_auc_from_score"] = float(average_precision_score_local(y_true, score))
+    else:
+        output[f"{prefix}roc_auc_from_score"] = float("nan")
+        output[f"{prefix}pr_auc_from_score"] = float("nan")
+    return output
+
+
+def summarize_events(frame: pd.DataFrame) -> pd.DataFrame:
+    rows = []
+    event_columns = [column for column in frame.columns if column.startswith("true_")]
+    for event_column in event_columns:
+        event_mask = frame[event_column].fillna(0).astype(int) > 0
+        normal_mask = ~event_mask
+        row = {
+            "event_type": event_column.replace("true_", ""),
+            "event_windows": int(event_mask.sum()),
+            "non_event_windows": int(normal_mask.sum()),
+        }
+        if event_mask.any():
+            row.update(
+                {
+                    "event_score_mean": float(frame.loc[event_mask, "score"].mean()),
+                    "event_score_p95": float(frame.loc[event_mask, "score"].quantile(0.95)),
+                }
+            )
+        else:
+            row.update({"event_score_mean": float("nan"), "event_score_p95": float("nan")})
+        if normal_mask.any():
+            row.update(
+                {
+                    "non_event_score_mean": float(frame.loc[normal_mask, "score"].mean()),
+                    "non_event_score_p95": float(frame.loc[normal_mask, "score"].quantile(0.95)),
+                }
+            )
+        else:
+            row.update({"non_event_score_mean": float("nan"), "non_event_score_p95": float("nan")})
+        rows.append(row)
+    return pd.DataFrame(rows)
+
+
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Test the joint financial prior attention model")
+    parser = argparse.ArgumentParser(description="Test the joint financial prior attention model and save raw scores")
     parser.add_argument("--data-path", default="datasets/SP500_event_taxonomy_w100")
     parser.add_argument("--tickers", nargs="*", default=None, help="Optional explicit ticker list")
     parser.add_argument("--window-size", type=int, default=100)
@@ -67,7 +115,6 @@ def main() -> None:
     parser.add_argument("--recon-weight", type=float, default=1.0)
     parser.add_argument("--divergence-weight", type=float, default=0.25)
     parser.add_argument("--association-weight", type=float, default=0.1)
-    parser.add_argument("--tolerance-windows", type=int, default=3)
     args = parser.parse_args()
 
     set_seed(args.seed)
@@ -76,32 +123,10 @@ def main() -> None:
     run_dir = get_run_dir(args.exp_name)
     checkpoint_run_dir = get_run_dir(args.checkpoint_exp_name) if args.checkpoint_exp_name else run_dir
     checkpoint_path = checkpoint_run_dir / "models" / "gbm_joint.pt"
-    threshold_path = run_dir / "reports" / "gbm_joint_threshold.json"
     if not checkpoint_path.exists():
         raise FileNotFoundError(f"Missing checkpoint: {checkpoint_path}")
-    if not threshold_path.exists():
-        raise FileNotFoundError(f"Missing validation threshold file: {threshold_path}")
 
     print(f"[test_joint] loading checkpoint={checkpoint_path}")
-    print(f"[test_joint] loading threshold={threshold_path}")
-
-    with open(threshold_path, "r", encoding="utf-8") as handle:
-        threshold_info = json.load(handle)
-    threshold = float(threshold_info["threshold"])
-    threshold_score_column = threshold_info.get("threshold_score_column", "score")
-    threshold_method = threshold_info.get("threshold_method", "quantile")
-    threshold_distribution = threshold_info.get("predictive_distribution")
-    if threshold_distribution is not None and threshold_distribution != args.predictive_distribution:
-        raise RuntimeError(
-            f"Validation threshold was fit with predictive_distribution={threshold_distribution}, "
-            f"but test requested {args.predictive_distribution}"
-        )
-    threshold_association_mode = threshold_info.get("association_mode")
-    if threshold_association_mode is not None and threshold_association_mode != args.association_mode:
-        raise RuntimeError(
-            f"Validation threshold was fit with association_mode={threshold_association_mode}, "
-            f"but test requested {args.association_mode}"
-        )
 
     manifest, window_store, scaler, train_ds, val_ds, test_ds, train_loader, val_loader, test_loader, input_dim = build_joint_loaders(
         data_path=args.data_path,
@@ -148,104 +173,44 @@ def main() -> None:
     if test_df.empty:
         raise RuntimeError("Test scoring returned no rows")
 
-    if threshold_score_column == "conformal_p_value":
-        calibration_scores = threshold_info.get("calibration_scores")
-        if not calibration_scores:
-            raise RuntimeError("Missing conformal calibration scores")
-        per_ticker_calibration_scores = threshold_info.get("per_ticker_calibration_scores")
-        if threshold_method == "per_ticker_conformal" or threshold_info.get("decision_rule") == "per_ticker_conformal_p_value_lt_alpha":
-            test_df = add_per_ticker_conformal_p_values(
-                test_df,
-                per_ticker_calibration_scores or {},
-                pd.Series(calibration_scores, dtype=float).to_numpy(),
-            )
-        else:
-            test_df = add_conformal_p_values(test_df, pd.Series(calibration_scores, dtype=float).to_numpy())
-        conformal_alpha = float(threshold_info.get("conformal_alpha", 1.0 - threshold_info.get("threshold_quantile", 0.95)))
-        test_df["y_pred"] = (test_df["conformal_p_value"] < conformal_alpha).astype(int)
-        metric_scores = -test_df["conformal_p_value"]
-        metric_threshold = -conformal_alpha
-    elif threshold_score_column == "tail_probability":
-        conformal_alpha = float(threshold_info.get("conformal_alpha", threshold))
-        test_df["y_pred"] = (test_df["tail_probability"] < conformal_alpha).astype(int)
-        metric_scores = -test_df["tail_probability"]
-        metric_threshold = -conformal_alpha
-    elif threshold_score_column == "score_turning_point":
-        test_df = apply_score_turning_point_rule(test_df)
-        metric_scores = test_df["score_turning_point"].fillna(0.0)
-        metric_threshold = 0.5
-    elif threshold_score_column in {"score_delta_abs", "score_curvature_abs"}:
-        if threshold is None:
-            raise RuntimeError(f"Missing threshold for {threshold_score_column}")
-        test_df = apply_score_change_threshold(test_df, threshold, column=threshold_score_column)
-        metric_scores = test_df[threshold_score_column].fillna(0.0)
-        metric_threshold = threshold
-    else:
-        if threshold is None:
-            raise RuntimeError("Missing score threshold")
-        test_df["y_pred"] = (test_df["score"] > threshold).astype(int)
-        metric_scores = test_df["score"]
-        metric_threshold = threshold
-    if "score_change_pred" not in test_df.columns:
-        test_df["score_change_pred"] = test_df["y_pred"].astype(int)
     test_df = add_test_event_columns(test_df, Path(args.data_path))
-    metrics = binary_metrics(test_df["y_true"].tolist(), metric_scores.tolist(), metric_threshold)
-    metrics.update(tolerance_metrics(test_df, args.tolerance_windows))
-    score_delta_abs = test_df["score_delta_abs"].fillna(0.0) if "score_delta_abs" in test_df else pd.Series([0.0])
-    score_curvature_abs = test_df["score_curvature_abs"].fillna(0.0) if "score_curvature_abs" in test_df else pd.Series([0.0])
+    metrics = score_summary(test_df)
     metrics.update(
         {
-            "threshold": threshold,
-            "threshold_score_column": threshold_score_column,
-            "decision_rule": threshold_info.get("decision_rule", "score_gt_validation_quantile"),
-            "threshold_method": threshold_method,
-            "conformal_alpha": threshold_info.get("conformal_alpha"),
             "predictive_distribution": args.predictive_distribution,
             "association_mode": args.association_mode,
-            "n_windows": int(len(test_df)),
             "ticker_count": int(manifest["ticker"].nunique()),
-            "anomaly_rate": float(test_df["y_true"].mean()),
-            "mean_score": float(test_df["score"].mean()),
-            "std_score": float(test_df["score"].std(ddof=0)),
+            "mean_reconstruction_error": float(test_df["reconstruction_error"].mean()),
             "mean_nll": float(test_df["nll"].mean()),
+            "mean_divergence": float(test_df["divergence"].mean()),
+            "mean_association_discrepancy": float(test_df["association_discrepancy"].mean()),
             "mean_tail_z_abs": float(test_df["tail_z_abs"].mean()),
-            "tolerance_windows": int(args.tolerance_windows),
-            "mean_score_delta_abs": float(score_delta_abs.mean()),
-            "mean_score_curvature_abs": float(score_curvature_abs.mean()),
         }
     )
 
     reports_dir = run_dir / "reports"
     reports_dir.mkdir(parents=True, exist_ok=True)
     scores_path = reports_dir / "gbm_joint_test_scores.csv"
-    metrics_path = reports_dir / "gbm_joint_metrics.json"
+    metrics_path = reports_dir / "gbm_joint_score_metrics.json"
     test_df.to_csv(scores_path, index=False)
     save_json(metrics_path, metrics)
 
     by_ticker_dir = reports_dir / "by_ticker"
     by_ticker_dir.mkdir(parents=True, exist_ok=True)
+    ticker_rows = []
     for ticker, group in test_df.groupby("ticker"):
         group.to_csv(by_ticker_dir / f"gbm_joint_{ticker}_test_scores.csv", index=False)
-
-    ticker_rows = []
-    for ticker, frame in test_df.groupby("ticker"):
-        if threshold_score_column == "conformal_p_value" and "conformal_p_value" in frame:
-            ticker_scores = (-frame["conformal_p_value"]).tolist()
-        elif threshold_score_column == "tail_probability" and "tail_probability" in frame:
-            ticker_scores = (-frame["tail_probability"]).tolist()
-        else:
-            score_column = threshold_score_column if threshold_score_column in frame else "score"
-            ticker_scores = frame[score_column].fillna(0.0).tolist()
         row = {"ticker": ticker}
-        row.update(binary_metrics(frame["y_true"].tolist(), ticker_scores, metric_threshold))
+        row.update(score_summary(group))
         ticker_rows.append(row)
-    ticker_summary = pd.DataFrame(ticker_rows)
-    ticker_summary.to_csv(reports_dir / "gbm_joint_metrics_by_ticker.csv", index=False)
-    event_summary = summarize_by_event_type(test_df)
-    event_summary.to_csv(reports_dir / "gbm_joint_metrics_by_event_type.csv", index=False)
-    print(f"Saved scores to {scores_path}")
-    print(f"Saved metrics to {metrics_path}")
-    print(f"Saved per-ticker scores to {by_ticker_dir}")
+    pd.DataFrame(ticker_rows).to_csv(reports_dir / "gbm_joint_score_metrics_by_ticker.csv", index=False)
+
+    event_summary = summarize_events(test_df)
+    if not event_summary.empty:
+        event_summary.to_csv(reports_dir / "gbm_joint_score_summary_by_event_type.csv", index=False)
+
+    print(f"Saved raw test scores to {scores_path}")
+    print(f"Saved raw score metrics to {metrics_path}")
 
 
 if __name__ == "__main__":

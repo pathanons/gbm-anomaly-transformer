@@ -122,7 +122,6 @@ def main() -> None:
         add_option("--patience", config.get("patience", 5))
         add_option("--k", config.get("k", 3.0))
         add_option("--temperature", config.get("temperature", 50.0))
-        add_option("--threshold-quantile", config.get("threshold_quantile", 0.95))
         add_option("--prior-type", config.get("prior_type", "gaussian"))
         add_option("--top-k", config.get("top_k", 10))
         add_option("--spike-percentile", config.get("spike_percentile", 0.95))

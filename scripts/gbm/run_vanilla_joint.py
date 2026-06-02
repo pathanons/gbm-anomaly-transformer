@@ -76,7 +76,6 @@ def main() -> None:
     parser.add_argument("--patience", type=int, default=5)
     parser.add_argument("--k", type=float, default=3.0)
     parser.add_argument("--temperature", type=float, default=50.0)
-    parser.add_argument("--threshold-quantile", type=float, default=0.95)
     parser.add_argument("--prior-type", default="gaussian", choices=["gaussian", "powerlaw"])
     parser.add_argument("--visualize", action="store_true", help="Generate vanilla price/score charts after testing")
     parser.add_argument("--show-true-labels", action="store_true")
@@ -189,7 +188,7 @@ def main() -> None:
             train_cmd.extend(["--tickers", *tickers])
         run_command(train_cmd, log_handle)
 
-        validate_cmd = [sys.executable, "-u", str(root / "scripts" / "gbm" / "validate_vanilla_joint.py"), *eval_common, "--threshold-quantile", str(args.threshold_quantile)]
+        validate_cmd = [sys.executable, "-u", str(root / "scripts" / "gbm" / "validate_vanilla_joint.py"), *eval_common]
         if tickers:
             validate_cmd.extend(["--tickers", *tickers])
         run_command(validate_cmd, log_handle)

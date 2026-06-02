@@ -11,6 +11,7 @@ This repo is the active `gbm-anomaly-transformer` workspace. Prefer the current 
 - Cross-platform launchers: `run.bat`, `run.sh`
 - Mac MPS environment: `environment.macos-mps.yml`
 - Curated legacy context: `docs/legacy/README.md`
+- Legacy research skill (Cursor): `.cursor/skills/gbm-legacy-context/SKILL.md`
 - Research claim map: `docs/RESEARCH_QUESTION_ANSWER_MAP.md`
 - Agent/context audit: `docs/AGENT_CONTEXT_AUDIT.md`
 - Canonical GBM attention interpretation: explicit latent source timestamp posterior over past timestamps, with Ito-corrected GBM log-price transitions and per-step date deltas.

@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import argparse
-import json
 import subprocess
 import sys
 from pathlib import Path
@@ -77,13 +76,11 @@ def choose_focus_range(
         work["strength"] = score_strength(work)
         work["priority"] = 0
         work.loc[work["y_true"].astype(int) > 0, "priority"] = 1
-        work.loc[work["y_pred"].astype(int) > 0, "priority"] = 2
-        work.loc[(work["y_true"].astype(int) > 0) & (work["y_pred"].astype(int) > 0), "priority"] = 3
         work = work[work["priority"] > 0]
         if work.empty:
             continue
         work["model"] = model_name
-        candidates.append(work[["start_date", "end_date", "y_true", "y_pred", "score", "strength", "priority", "model"]])
+        candidates.append(work[["start_date", "end_date", "y_true", "score", "strength", "priority", "model"]])
 
     if not candidates:
         return max(detection_start, detection_end - focus_delta), detection_end, "latest test windows"
@@ -98,37 +95,49 @@ def choose_focus_range(
             focus_end = min(detection_end, focus_start + focus_delta)
         elif focus_end == detection_end:
             focus_start = max(detection_start, focus_end - focus_delta)
-    reason = f"{best['model']} high-confidence test anomaly near {center.date()}"
+    reason = f"{best['model']} labeled test window near {center.date()}"
     return focus_start, focus_end, reason
 
 
-def load_scores(exp_name: str) -> tuple[pd.DataFrame, float | None]:
+def load_scores(exp_name: str, model: str) -> pd.DataFrame:
+    if model not in {"gbm", "vanilla"}:
+        raise ValueError(f"model must be 'gbm' or 'vanilla', got {model!r}")
+
+    filename = "gbm_joint_test_scores.csv" if model == "gbm" else "vanilla_joint_test_scores.csv"
     run_dir = get_run_dir(exp_name)
-    scores_path = run_dir / "reports" / "gbm_joint_test_scores.csv"
-    if not scores_path.exists():
-        scores_path = run_dir / "reports" / "vanilla_joint_test_scores.csv"
-    if not scores_path.exists():
-        raise FileNotFoundError(f"Missing scores file for {exp_name}: {scores_path}")
-    scores_df = pd.read_csv(scores_path, parse_dates=["start_date", "end_date"])
+    scores_path = run_dir / "reports" / filename
+    if scores_path.exists():
+        return pd.read_csv(scores_path, parse_dates=["start_date", "end_date"])
 
-    threshold = None
-    for threshold_name in ["gbm_joint_threshold.json", "vanilla_joint_threshold.json"]:
-        threshold_path = run_dir / "reports" / threshold_name
-        if threshold_path.exists():
-            with open(threshold_path, "r", encoding="utf-8") as handle:
-                threshold = float(json.load(handle)["threshold"])
-            break
-    return scores_df, threshold
+    reports_dir = run_dir / "reports"
+    available = sorted(path.name for path in reports_dir.glob("*.csv")) if reports_dir.exists() else []
+    raise FileNotFoundError(
+        f"Missing {model} test scores for experiment '{exp_name}'.\n"
+        f"Expected: {scores_path}\n"
+        f"Run directory exists: {run_dir.exists()}\n"
+        f"CSV files in reports/: {available or '(none)'}\n"
+        f"Hint: re-run train -> validate -> test for this experiment before compare."
+    )
 
 
-def load_metrics(exp_name: str) -> dict[str, object]:
-    run_dir = get_run_dir(exp_name)
-    for metrics_name in ["gbm_joint_metrics.json", "vanilla_joint_metrics.json"]:
-        metrics_path = run_dir / "reports" / metrics_name
-        if metrics_path.exists():
-            with open(metrics_path, "r", encoding="utf-8") as handle:
-                return json.load(handle)
-    return {}
+def ticker_score_summary(frame: pd.DataFrame) -> dict[str, float | int]:
+    score = frame["score"].astype(float)
+    y_true = frame["y_true"].astype(int)
+    out: dict[str, float | int] = {
+        "n_windows": int(len(frame)),
+        "score_mean": float(score.mean()) if len(frame) else float("nan"),
+        "score_std": float(score.std(ddof=0)) if len(frame) else float("nan"),
+        "score_p95": float(score.quantile(0.95)) if len(frame) else float("nan"),
+    }
+    if y_true.nunique() >= 2:
+        from src.gbm.score_dynamics import average_precision_score_local, roc_auc_score_local
+
+        out["roc_auc_from_score"] = float(roc_auc_score_local(y_true, score))
+        out["pr_auc_from_score"] = float(average_precision_score_local(y_true, score))
+    else:
+        out["roc_auc_from_score"] = float("nan")
+        out["pr_auc_from_score"] = float("nan")
+    return out
 
 
 def main() -> None:
@@ -136,7 +145,7 @@ def main() -> None:
     parser.add_argument("--gbm-exp-name", required=True)
     parser.add_argument("--vanilla-exp-name", required=True)
     parser.add_argument("--data-path", default="datasets/SP500_event_taxonomy_w100")
-    parser.add_argument("--ticker", default=None, help="Ticker to plot, or ALL to plot every ticker shared by both runs")
+    parser.add_argument("--ticker", default=None, help="Ticker symbol to plot (use --all-tickers for every shared ticker)")
     parser.add_argument("--all-tickers", action="store_true", help="Plot every ticker shared by both runs")
     parser.add_argument("--limit", type=int, default=None, help="Optional max tickers to plot when using --all-tickers/--ticker ALL")
     parser.add_argument("--output-dir", default=None)
@@ -151,11 +160,11 @@ def main() -> None:
     parser.add_argument("--focus-days", type=int, default=540, help="Approximate days shown for anomaly/tail views")
     args = parser.parse_args()
 
-    gbm_df, gbm_threshold = load_scores(args.gbm_exp_name)
-    vanilla_df, vanilla_threshold = load_scores(args.vanilla_exp_name)
+    gbm_df = load_scores(args.gbm_exp_name, model="gbm")
+    vanilla_df = load_scores(args.vanilla_exp_name, model="vanilla")
 
-    run_all = args.all_tickers or (args.ticker is not None and args.ticker.upper() == "ALL")
-    if run_all:
+    # Use --all-tickers only; do not treat stock symbol "ALL" (Allstate) as plot-all mode.
+    if args.all_tickers:
         gbm_tickers = set(gbm_df["ticker"].dropna().astype(str).unique())
         vanilla_tickers = set(vanilla_df["ticker"].dropna().astype(str).unique())
         tickers = sorted(gbm_tickers & vanilla_tickers)
@@ -165,7 +174,15 @@ def main() -> None:
             raise RuntimeError("No shared tickers found between GBM and vanilla score files")
 
         print(f"[compare_gbm_vanilla_joint] plotting {len(tickers)} tickers")
+        output_dir = Path(args.output_dir) if args.output_dir else get_run_dir(f"{args.gbm_exp_name}_vs_{args.vanilla_exp_name}")
+        output_dir.mkdir(parents=True, exist_ok=True)
+
         for idx, ticker in enumerate(tickers, start=1):
+            out_png = output_dir / f"{ticker}_gbm_vs_vanilla_comparison.png"
+            if out_png.exists():
+                print(f"[compare_gbm_vanilla_joint] {idx}/{len(tickers)} {ticker} skip (exists)", flush=True)
+                continue
+
             command = [
                 sys.executable,
                 str(Path(__file__)),
@@ -194,10 +211,7 @@ def main() -> None:
         return
 
     if not args.ticker:
-        raise RuntimeError("Please pass --ticker AAPL, --ticker ALL, or --all-tickers")
-
-    gbm_metrics = load_metrics(args.gbm_exp_name)
-    vanilla_metrics = load_metrics(args.vanilla_exp_name)
+        raise RuntimeError("Please pass --ticker SYMBOL or --all-tickers")
 
     gbm_df = gbm_df[gbm_df["ticker"] == args.ticker].sort_values("end_date").reset_index(drop=True)
     vanilla_df = vanilla_df[vanilla_df["ticker"] == args.ticker].sort_values("end_date").reset_index(drop=True)
@@ -225,22 +239,10 @@ def main() -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
 
     summary_rows = []
-    for model_name, metrics in [("gbm", gbm_metrics), ("vanilla", vanilla_metrics)]:
-        summary_rows.append(
-            {
-                "model": model_name,
-                "roc_auc": metrics.get("roc_auc"),
-                "pr_auc": metrics.get("pr_auc"),
-                "f1_score": metrics.get("f1_score"),
-                "precision": metrics.get("precision"),
-                "sensitivity": metrics.get("sensitivity"),
-                "specificity": metrics.get("specificity"),
-                "threshold": metrics.get("threshold"),
-                "mean_score": metrics.get("mean_score"),
-                "std_score": metrics.get("std_score"),
-                "n_windows": metrics.get("n_windows"),
-            }
-        )
+    for model_name, frame in [("gbm", gbm_plot_df), ("vanilla", vanilla_plot_df)]:
+        row = {"model": model_name}
+        row.update(ticker_score_summary(frame))
+        summary_rows.append(row)
     summary_df = pd.DataFrame(summary_rows)
     summary_path = output_dir / f"{args.ticker}_comparison_metrics.csv"
     summary_df.to_csv(summary_path, index=False)
@@ -258,31 +260,31 @@ def main() -> None:
     ax_price.grid(True, alpha=0.25)
 
     ax_gbm.plot(gbm_plot_df["end_date"], gbm_plot_df["score"], color="#1f77b4", linewidth=1.05, label="GBM score")
+    gbm_spike_threshold = gbm_plot_df["score"].quantile(0.95)
+    gbm_spike_mask = gbm_plot_df["score"] >= gbm_spike_threshold
     ax_gbm.scatter(
-        gbm_plot_df.loc[gbm_plot_df["y_pred"] == 1, "end_date"],
-        gbm_plot_df.loc[gbm_plot_df["y_pred"] == 1, "score"],
+        gbm_plot_df.loc[gbm_spike_mask, "end_date"],
+        gbm_plot_df.loc[gbm_spike_mask, "score"],
         color="#d62728",
-        s=24,
-        label="Predicted anomaly",
+        s=18,
+        label="Top 5% local score",
         zorder=3,
     )
-    if gbm_threshold is not None:
-        ax_gbm.axhline(gbm_threshold, color="#ff7f0e", linestyle="--", linewidth=1.1, label=f"GBM threshold {gbm_threshold:.4f}")
     ax_gbm.set_ylabel("GBM score")
     ax_gbm.grid(True, alpha=0.25)
     ax_gbm.legend(loc="upper left")
 
     ax_vanilla.plot(vanilla_plot_df["end_date"], vanilla_plot_df["score"], color="#2ca02c", linewidth=1.05, label="Vanilla score")
+    vanilla_spike_threshold = vanilla_plot_df["score"].quantile(0.95)
+    vanilla_spike_mask = vanilla_plot_df["score"] >= vanilla_spike_threshold
     ax_vanilla.scatter(
-        vanilla_plot_df.loc[vanilla_plot_df["y_pred"] == 1, "end_date"],
-        vanilla_plot_df.loc[vanilla_plot_df["y_pred"] == 1, "score"],
+        vanilla_plot_df.loc[vanilla_spike_mask, "end_date"],
+        vanilla_plot_df.loc[vanilla_spike_mask, "score"],
         color="#d62728",
-        s=24,
-        label="Predicted anomaly",
+        s=18,
+        label="Top 5% local score",
         zorder=3,
     )
-    if vanilla_threshold is not None:
-        ax_vanilla.axhline(vanilla_threshold, color="#ff7f0e", linestyle="--", linewidth=1.1, label=f"Vanilla threshold {vanilla_threshold:.4f}")
     ax_vanilla.set_ylabel("Vanilla score")
     ax_vanilla.set_xlabel("Date")
     ax_vanilla.grid(True, alpha=0.25)

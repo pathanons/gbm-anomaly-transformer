@@ -38,10 +38,7 @@ $common = @(
     "--window-size", "$WindowSize",
     "--step", "$Step",
     "--seed", "$Seed",
-    "--predictive-distribution", "student_t",
-    "--threshold-method", "conformal",
-    "--threshold-quantile", "0.95",
-    "--tolerance-windows", "3"
+    "--predictive-distribution", "student_t"
 )
 if ($Visualize) {
     $common += "--visualize"
@@ -49,14 +46,14 @@ if ($Visualize) {
 }
 
 $experiments = @(
-    @{ Name = "review_none_all_studentt_conformal"; Mode = "none"; Features = "all" },
-    @{ Name = "review_temporal_all_studentt_conformal"; Mode = "temporal"; Features = "all" },
-    @{ Name = "review_logret_all_studentt_conformal"; Mode = "gaussian_log_return"; Features = "all" },
-    @{ Name = "review_canonical_all_studentt_conformal"; Mode = "canonical_gbm"; Features = "all" },
-    @{ Name = "review_none_price_studentt_conformal"; Mode = "none"; Features = "price_only" },
-    @{ Name = "review_temporal_price_studentt_conformal"; Mode = "temporal"; Features = "price_only" },
-    @{ Name = "review_logret_price_studentt_conformal"; Mode = "gaussian_log_return"; Features = "price_only" },
-    @{ Name = "review_canonical_price_studentt_conformal"; Mode = "canonical_gbm"; Features = "price_only" }
+    @{ Name = "review_none_all_studentt_rawscore"; Mode = "none"; Features = "all" },
+    @{ Name = "review_temporal_all_studentt_rawscore"; Mode = "temporal"; Features = "all" },
+    @{ Name = "review_logret_all_studentt_rawscore"; Mode = "gaussian_log_return"; Features = "all" },
+    @{ Name = "review_canonical_all_studentt_rawscore"; Mode = "canonical_gbm"; Features = "all" },
+    @{ Name = "review_none_price_studentt_rawscore"; Mode = "none"; Features = "price_only" },
+    @{ Name = "review_temporal_price_studentt_rawscore"; Mode = "temporal"; Features = "price_only" },
+    @{ Name = "review_logret_price_studentt_rawscore"; Mode = "gaussian_log_return"; Features = "price_only" },
+    @{ Name = "review_canonical_price_studentt_rawscore"; Mode = "canonical_gbm"; Features = "price_only" }
 )
 
 foreach ($experiment in $experiments) {
@@ -73,7 +70,7 @@ foreach ($experiment in $experiments) {
 Write-Host "=== Running predictive-distribution ablation: canonical Gaussian ==="
 Invoke-Experiment -Command @(
     $Python, "-u", "scripts/gbm/run_joint.py",
-    "--exp-name", "review_canonical_all_gaussian_conformal",
+    "--exp-name", "review_canonical_all_gaussian_rawscore",
     "--association-mode", "canonical_gbm",
     "--features", "all",
     "--data-path", $DataPath,
@@ -83,29 +80,7 @@ Invoke-Experiment -Command @(
     "--window-size", "$WindowSize",
     "--step", "$Step",
     "--seed", "$Seed",
-    "--predictive-distribution", "gaussian",
-    "--threshold-method", "conformal",
-    "--threshold-quantile", "0.95",
-    "--tolerance-windows", "3"
-)
-
-Write-Host "=== Running threshold-rule ablation: canonical quantile ==="
-Invoke-Experiment -Command @(
-    $Python, "-u", "scripts/gbm/run_joint.py",
-    "--exp-name", "review_canonical_all_studentt_quantile",
-    "--association-mode", "canonical_gbm",
-    "--features", "all",
-    "--data-path", $DataPath,
-    "--device", $Device,
-    "--epochs", "$Epochs",
-    "--batch-size", "$BatchSize",
-    "--window-size", "$WindowSize",
-    "--step", "$Step",
-    "--seed", "$Seed",
-    "--predictive-distribution", "student_t",
-    "--threshold-method", "quantile",
-    "--threshold-quantile", "0.95",
-    "--tolerance-windows", "3"
+    "--predictive-distribution", "gaussian"
 )
 
 Write-Host "Review experiment suite complete. Outputs are under $OutputRoot\experiments"

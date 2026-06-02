@@ -17,7 +17,7 @@ scripts/gbm/run_canonical_gbm_attention.py
 ```text
 configs/                example configs
 datasets/               prepared OHLCV and anomaly-label CSVs
-scripts/gbm/            train, validate, test, visualize, score-change tools
+scripts/gbm/            train, validate, test, visualize, baselines
 scripts/data_prep/      event-taxonomy dataset generation utilities
 src/gbm/                model, data loading, losses, metrics, scoring, device helpers
 utils/                  shared dataset and validation helpers
@@ -51,8 +51,7 @@ WINDOW_SIZE=100
 FEATURES=all
 BATCH_SIZE=32
 EPOCHS=20
-PREDICTIVE_DISTRIBUTION=gaussian
-THRESHOLD_METHOD=quantile
+PREDICTIVE_DISTRIBUTION=gaussian (override with run_joint.py flags)
 AT_OUTPUT_ROOT=D:\AnomalyTransformerRuns on Windows .bat entrypoints
 ```
 
@@ -72,21 +71,21 @@ run.bat --visualize
 Gaussian log-return attention:
 
 ```bat
-run_log_return_attention.bat --predictive-distribution student_t --threshold-method conformal --threshold-quantile 0.95
+run_log_return_attention.bat --predictive-distribution student_t --visualize
 ```
 
 ```bash
-bash run_log_return_attention.sh --predictive-distribution student_t --threshold-method conformal --threshold-quantile 0.95
+bash run_log_return_attention.sh --predictive-distribution student_t --visualize
 ```
 
 Canonical GBM attention:
 
 ```bat
-run_canonical_gbm_attention.bat --predictive-distribution student_t --threshold-method conformal --threshold-quantile 0.95
+run_canonical_gbm_attention.bat --predictive-distribution student_t --visualize
 ```
 
 ```bash
-bash run_canonical_gbm_attention.sh --predictive-distribution student_t --threshold-method conformal --threshold-quantile 0.95
+bash run_canonical_gbm_attention.sh --predictive-distribution student_t --visualize
 ```
 
 By default, the joint data loader uses chronological splits with an embargo gap derived from the window size, fits normalization on training windows only, and trains only on normal training windows. Use `--include-anomalous-train` only for contamination ablations.
@@ -163,15 +162,16 @@ run.bat --epochs 1
 Key report files:
 
 ```text
-gbm_joint_threshold.json
+gbm_joint_score_summary.json
 gbm_joint_validation_scores.csv
+gbm_joint_test_scores_preview.csv
 gbm_joint_test_scores.csv
-gbm_joint_metrics.json
-gbm_joint_metrics_by_ticker.csv
-gbm_joint_metrics_by_event_type.csv
+gbm_joint_score_metrics.json
+gbm_joint_score_metrics_by_ticker.csv
+gbm_joint_score_summary_by_event_type.csv
 ```
 
-`validate_joint.py` fits the anomaly threshold on validation scores only. The default decision rule is `score > validation normal-score quantile`; `--threshold-method conformal` instead stores validation calibration scores and uses conformal p-values in test. `test_joint.py` then locks the validation rule and reports point metrics, tolerance-window metrics, by-ticker metrics, and by-event-type catch rates.
+`validate_joint.py` and `test_joint.py` export **per-window raw scores** and score-distribution summaries. Each row includes `reconstruction_error`, `nll`, `divergence`, `association_discrepancy`, and the combined `score`. For canonical GBM runs, `association_discrepancy` is the symmetric KL between learned attention and the GBM latent-timestamp posterior. Thresholding, conformal calibration, and score-change alerting are not part of the active joint pipeline; historical summaries live under `docs/legacy/gbm-report-summaries/`.
 
 ## Legacy Context
 
