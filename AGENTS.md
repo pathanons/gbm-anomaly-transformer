@@ -7,6 +7,7 @@ This repo is the active `gbm-anomaly-transformer` workspace. Prefer the current 
 - Gaussian log-return runner: `scripts/gbm/run_gaussian_log_return_attention.py`
 - Canonical GBM runner: `scripts/gbm/run_canonical_gbm_attention.py`
 - Shared runtime entry point: `scripts/gbm/run_joint.py`
+- Active research plan: `docs/research-plan-070662026.md`
 - Device helper: `src/gbm/device.py`
 - Cross-platform launchers: `run.bat`, `run.sh`
 - Mac MPS environment: `environment.macos-mps.yml`
@@ -43,6 +44,8 @@ run.bat --visualize
 - Keep generated results, checkpoints, logs, and figures out of git unless the user explicitly asks to preserve a small report artifact.
 - Check `docs/RESEARCH_QUESTION_ANSWER_MAP.md` before making research claims.
 - Treat baseline superiority, early-warning lead time, explanation faithfulness, and cross-sectional contribution as open until new evidence is added.
+- Before implementation work, read `docs/research-plan-070662026.md` and keep it updated with concise implementation outcomes, validation findings, and open issues.
+- When a task completes, append a short result note to `docs/research-plan-070662026.md` rather than scattering status across multiple docs.
 
 ## Editing Rules
 
