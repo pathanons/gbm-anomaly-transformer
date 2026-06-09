@@ -93,9 +93,18 @@ visualization checks.
 Best-current-model long suite:
 
 ```powershell
+best.bat
+```
+
+Manual equivalent:
+
+```powershell
 $env:AT_OUTPUT_ROOT="D:/AnomalyTransformerRuns"
 python run.py --config configs/general/best_model_suite.yaml
 ```
+
+Use `best.bat --test-only` for the pytest gate and `best.bat --dry-run` for
+pytest plus suite expansion without starting training.
 
 This expands the current Gaussian log-return / NLL+association setup across
 heads, layers, learning rates, epochs, and seeds, then runs MAD threshold

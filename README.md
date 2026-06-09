@@ -46,6 +46,19 @@ Run the fast pytest gate before long experiments:
 python -m pytest unittest
 ```
 
+On Windows, the curated best-model launcher is:
+
+```powershell
+best.bat
+```
+
+Useful checks:
+
+```powershell
+best.bat --test-only
+best.bat --dry-run
+```
+
 ## Configs By Phase
 
 - `configs/general/` - routine data preparation, train, test, configurable MAD visualization, and best-model suite configs
