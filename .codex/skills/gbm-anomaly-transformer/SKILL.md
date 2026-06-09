@@ -22,7 +22,7 @@ The active stage files are:
 - `src/gbm/score.py` for loss and score definitions.
 - `src/gbm/train.py` for training.
 - `src/gbm/test.py` for validation/testing and score export.
-- `src/gbm/visualize.py` for k=9 MAD visualization.
+- `src/gbm/visualize.py` for configurable k*MAD visualization.
 - `src/gbm/statistics.py` for statistical baselines and evaluation.
 
 Do not add new one-off `run_*.py`, `*_joint.py`, `visualize_*.py`, or experiment-specific Python entry points. Add experiment variants as YAML configs and reusable options in the existing stage files.
@@ -36,7 +36,7 @@ Bayesian prior emitted by GBM without mentioning the latent timestamp model.
 
 ## Config Layout
 
-- `configs/general/`: routine data preparation, train, test, and k=9 MAD visualization configs.
+- `configs/general/`: routine data preparation, train, test, configurable MAD visualization, and the best-model suite.
 - `configs/phase1/`: dataset preparation, statistical evaluation, data insight, legacy/refactored score checks, and loss ablation.
 - `configs/phase2/`: distribution-shift score variants (`legacy`, `refactored`, `qw2`, `qw2_tail`).
 - `configs/phase3/`: model and association-mode experiments (`gaussian_log_return`, `canonical_gbm`, `temporal`, `none`).
@@ -69,6 +69,7 @@ python run.py --config configs/general/data_prepare.yaml --dry-run
 python run.py --config configs/general/train.yaml --dry-run
 python run.py --config configs/general/test.yaml --dry-run
 python run.py --config configs/general/visualize.yaml --dry-run
+python run.py --config configs/general/best_model_suite.yaml --dry-run
 ```
 
 Research phase example:
@@ -78,6 +79,29 @@ python run.py --config configs/phase3/example_log_return.yaml --dry-run
 ```
 
 Set `AT_OUTPUT_ROOT=D:/AnomalyTransformerRuns` for training/testing so artifacts resolve outside the repo.
+
+Fast pre-run unit tests:
+
+```powershell
+python -m pytest unittest
+```
+
+Some tests use `pytest.importorskip("torch")` so lightweight Python
+interpreters without PyTorch can still run the non-torch config and
+visualization checks.
+
+Best-current-model long suite:
+
+```powershell
+$env:AT_OUTPUT_ROOT="D:/AnomalyTransformerRuns"
+python run.py --config configs/general/best_model_suite.yaml
+```
+
+This expands the current Gaussian log-return / NLL+association setup across
+heads, layers, learning rates, epochs, and seeds, then runs MAD threshold
+visualization for k values from 9 upward as configured in YAML. Treat the seed
+sweep as a stability/CV proxy until true walk-forward cross-validation is
+implemented.
 
 ## Research Guardrails
 

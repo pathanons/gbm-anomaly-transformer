@@ -37,11 +37,18 @@ python run.py --config configs/general/data_prepare.yaml
 python run.py --config configs/general/train.yaml
 python run.py --config configs/general/test.yaml
 python run.py --config configs/general/visualize.yaml
+python run.py --config configs/general/best_model_suite.yaml --dry-run
+```
+
+Run the fast pytest gate before long experiments:
+
+```powershell
+python -m pytest unittest
 ```
 
 ## Configs By Phase
 
-- `configs/general/` - routine data preparation, train, test, and k=9 MAD visualization configs
+- `configs/general/` - routine data preparation, train, test, configurable MAD visualization, and best-model suite configs
 - `configs/phase1/` - data preparation, data statistics, legacy/refactored score checks, loss ablation
 - `configs/phase2/` - distribution-shift score modes: legacy, refactored, QW2, QW2Tail
 - `configs/phase3/` - log-return/canonical model configs and association-mode ablations

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+import itertools
 from argparse import Namespace
 from pathlib import Path
 from typing import Iterable
@@ -20,6 +21,7 @@ PIPELINES = {
     "train",
     "validate",
     "visualize",
+    "experiment_suite",
 }
 
 GBM_DEFAULTS = {
@@ -113,6 +115,19 @@ def load_flat_yaml(path: Path, list_int_keys: Iterable[str] = ()) -> dict[str, o
     return config
 
 
+def parse_csv_values(value: object, cast=str) -> list:
+    if value is None:
+        return []
+    if isinstance(value, (list, tuple)):
+        return [cast(item) for item in value]
+    return [cast(item.strip()) for item in str(value).split(",") if item.strip()]
+
+
+def float_tag(value: object) -> str:
+    text = f"{float(value):.8f}".rstrip("0").rstrip(".")
+    return text.replace(".", "p").replace("-", "m")
+
+
 def as_bool(value: object, default: bool = False) -> bool:
     if value is None:
         return default
@@ -142,6 +157,11 @@ def resolve_template(value: object, window_size: int, default: str) -> str:
     if "{window_size}" in template:
         return template.format(window_size=window_size)
     return template
+
+
+def resolve_suite_template(value: object, params: dict[str, object], default: str) -> str:
+    template = default if value is None else str(value)
+    return template.format(**params)
 
 
 def pipeline_name(config: dict[str, object]) -> str:
@@ -202,6 +222,99 @@ def run_gbm_config(config: dict[str, object], window_size: int, exp_name: str, d
     train_model(args)
     validate_model(args)
     test_model(args)
+
+
+def suite_trials(config: dict[str, object]) -> list[dict[str, object]]:
+    heads = parse_csv_values(config.get("n_heads_values", config.get("n_heads", 4)), int)
+    layers = parse_csv_values(config.get("e_layers_values", config.get("e_layers", 3)), int)
+    learning_rates = parse_csv_values(config.get("lr_values", config.get("lr", 1e-4)), float)
+    epochs = parse_csv_values(config.get("epoch_values", config.get("epochs", 20)), int)
+    seeds = parse_csv_values(config.get("seed_values", config.get("seed", 42)), int)
+    if not all([heads, layers, learning_rates, epochs, seeds]):
+        raise ValueError("experiment_suite requires non-empty heads/layers/lr/epoch/seed values")
+
+    trials = []
+    for n_heads, e_layers, lr, epoch_count, seed in itertools.product(heads, layers, learning_rates, epochs, seeds):
+        trials.append(
+            {
+                "n_heads": n_heads,
+                "e_layers": e_layers,
+                "lr": lr,
+                "epochs": epoch_count,
+                "seed": seed,
+            }
+        )
+    return trials
+
+
+def run_experiment_suite(config: dict[str, object], dry_run: bool) -> None:
+    trials = suite_trials(config)
+    max_trials = config.get("max_trials", None)
+    if max_trials is not None:
+        trials = trials[: int(max_trials)]
+
+    mad_k_values = parse_csv_values(config.get("mad_k_values", "9"), float)
+    window_size = int(config.get("window_size", 100))
+    base_exp_name = str(config.get("exp_name", "best_nllassoc_suite"))
+    output_root = config.get("output_root")
+    print(
+        f"[main] experiment suite: trials={len(trials)} window_size={window_size} "
+        f"mad_k_values={','.join(str(k) for k in mad_k_values)}"
+    )
+
+    for idx, trial in enumerate(trials, start=1):
+        params = {
+            **trial,
+            "trial": idx,
+            "window_size": window_size,
+            "lr_tag": float_tag(trial["lr"]),
+        }
+        default_name = (
+            f"{base_exp_name}_t{idx}_w{window_size}_h{trial['n_heads']}"
+            f"_l{trial['e_layers']}_lr{params['lr_tag']}_ep{trial['epochs']}_s{trial['seed']}"
+        )
+        exp_name = resolve_suite_template(config.get("exp_name_template"), params, default_name)
+        trial_config = {
+            **config,
+            **trial,
+            "pipeline": str(config.get("model_pipeline", "log_return")),
+            "exp_name": exp_name,
+            "window_size": window_size,
+        }
+        print(f"[main] suite trial {idx}/{len(trials)} exp={exp_name}")
+        run_gbm_config(trial_config, window_size, exp_name, dry_run)
+
+        if not mad_k_values:
+            continue
+        score_csv = str(
+            config.get(
+                "score_csv_template",
+                "D:/AnomalyTransformerRuns/experiments/{exp_name}/reports/test_scores.csv",
+            )
+        ).format(exp_name=exp_name)
+        for mad_k in mad_k_values:
+            k_tag = str(mad_k).replace(".", "p")
+            out_dir = str(
+                config.get(
+                    "mad_out_template",
+                    "D:/AnomalyTransformerRuns/experiments/{exp_name}/figures/mad_k{k_tag}",
+                )
+            ).format(exp_name=exp_name, k=mad_k, k_tag=k_tag)
+            print(f"[main] suite threshold k={mad_k:g} csv={score_csv} out={out_dir}")
+            if dry_run:
+                continue
+            args = namespace_for_stage(
+                {
+                    **config,
+                    "pipeline": "mad_visualize",
+                    "csv": score_csv,
+                    "out": out_dir,
+                    "outlier_k": mad_k,
+                }
+            )
+            from src.gbm.visualize import run_mad_visualize
+
+            run_mad_visualize(args)
 
 
 def run_data_prepare(config: dict[str, object], window_size: int, exp_name: str, dry_run: bool) -> None:
@@ -312,6 +425,10 @@ def run_config(config_path: Path, dry_run: bool) -> None:
         from src.gbm.visualize import run_mad_visualize
 
         run_mad_visualize(args)
+        return
+
+    if pipeline == "experiment_suite":
+        run_experiment_suite(config, dry_run)
         return
 
 

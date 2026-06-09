@@ -175,6 +175,7 @@ def plot_mad_ticker(
     label_columns: list[str],
     price_dir: Path,
     price_z_thr: float,
+    mad_k: float = MAD_K,
 ) -> SpikeSummary | None:
     sub = scores_df[scores_df["ticker"].astype(str) == ticker].sort_values("end_date").reset_index(drop=True)
     if sub.empty:
@@ -188,7 +189,7 @@ def plot_mad_ticker(
     sub["end_date"] = pd.to_datetime(sub["end_date"])
     sub = add_final_score_columns(sub)
 
-    spike_mask, threshold_stats = final_spike_mask(sub, MAD_K)
+    spike_mask, threshold_stats = final_spike_mask(sub, mad_k)
     spike_dates = list(sub.loc[spike_mask, "end_date"])
     scored_dates = set(pd.to_datetime(sub["end_date"]))
 
@@ -242,7 +243,7 @@ def plot_mad_ticker(
         color="red",
         linestyle="--",
         linewidth=1.0,
-        label=f"k=9 MAD threshold={threshold_stats.threshold:.3g}",
+        label=f"k={mad_k:g} MAD threshold={threshold_stats.threshold:.3g}",
     )
     ax_dz.set_ylabel("Abs diff")
     ax_dz.set_xlabel("Date")
@@ -289,9 +290,10 @@ def run_mad_visualize(args) -> pd.DataFrame:
     outdir = Path(args.out)
     price_dir = Path(getattr(args, "price_dir", DEFAULT_PRICE_DIR) or DEFAULT_PRICE_DIR)
     price_z_thr = float(getattr(args, "price_z_thr", 3.0) or 3.0)
+    mad_k = float(getattr(args, "outlier_k", MAD_K) or MAD_K)
     summary: list[SpikeSummary] = []
     for idx, ticker in enumerate(tickers, start=1):
-        result = plot_mad_ticker(scores_df, ticker, outdir, label_columns, price_dir, price_z_thr)
+        result = plot_mad_ticker(scores_df, ticker, outdir, label_columns, price_dir, price_z_thr, mad_k=mad_k)
         if result is not None:
             summary.append(result)
         if idx % max(1, len(tickers) // 10) == 0:
