@@ -1,0 +1,10 @@
+pipeline: statistical_baseline
+exp_name: phase1_data_insight_w{window_size}
+data_path: datasets/SP500_event_taxonomy_w{window_size}
+tickers: all
+features: all
+window_size: 100
+step: 1
+seed: 42
+threshold_quantile: 0.95
+baselines: rolling_volatility,mean_abs_return,max_return_zscore,ewma_volatility,cusum_abs_return

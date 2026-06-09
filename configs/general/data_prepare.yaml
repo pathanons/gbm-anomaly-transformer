@@ -1,0 +1,11 @@
+pipeline: data_prepare
+exp_name: data_prepare_w{window_size}
+data_path: datasets/SP500_event_taxonomy_w{window_size}
+tickers: all
+features: all
+window_size: 100
+step: 1
+seed: 42
+split_method: chronological
+purge_gap: null
+include_anomalous_train: false

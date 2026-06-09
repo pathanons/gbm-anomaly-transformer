@@ -1,202 +1,56 @@
-# Financial Prior Attention Transformers
+# GBM Anomaly Transformer
 
-Workspace for pooled, multi-ticker financial anomaly detection on S&P 500-style OHLCV windows. There are two distinct attention-prior models:
-
-- Gaussian log-return attention: a Transformer with a Gaussian latent-timestamp posterior from log-return transition likelihoods.
-- Canonical GBM attention: a Transformer whose attention path uses the canonical GBM price process, applies the Ito correction inside the log-price transition law, supports per-step time deltas from observed dates, and interprets the attention target as a posterior over an explicit latent source timestamp.
-
-Use the dedicated runners below so these two models are not mixed accidentally:
-
-```text
-scripts/gbm/run_gaussian_log_return_attention.py
-scripts/gbm/run_canonical_gbm_attention.py
-```
-
-## Active Layout
-
-```text
-configs/                example configs
-datasets/               prepared OHLCV and anomaly-label CSVs
-scripts/gbm/            train, validate, test, visualize, baselines
-scripts/data_prep/      event-taxonomy dataset generation utilities
-src/gbm/                model, data loading, losses, metrics, scoring, device helpers
-utils/                  shared dataset and validation helpers
-docs/legacy/            curated old reports, insights, and research context
-.github/                agent prompts and review instructions
-.codex/skills/          repo-local Codex skill for this project
-```
-
-Generated outputs go under the configured output root, then `experiments/<exp-name>/`. By default this is `results/experiments/<exp-name>/`; set `AT_OUTPUT_ROOT` to move generated runs elsewhere. On Windows, `run.bat` and `train.bat` default to `D:\AnomalyTransformerRuns` to keep large outputs off `C:/`.
-
-## Quick Run
-
-Windows:
-
-```bat
-run.bat --visualize
-```
-
-macOS/Linux:
+This repo now uses one YAML-driven entry point:
 
 ```bash
-bash run.sh --visualize
+python run.py --config configs/phase3/example_log_return.yaml
 ```
 
-Both scripts default to:
-
-```text
-EXP_NAME=experiment3_joint
-DATA_PATH=datasets/SP500_event_taxonomy_w100
-WINDOW_SIZE=100
-FEATURES=all
-BATCH_SIZE=32
-EPOCHS=20
-PREDICTIVE_DISTRIBUTION=gaussian (override with run_joint.py flags)
-AT_OUTPUT_ROOT=D:\AnomalyTransformerRuns on Windows .bat entrypoints
-```
-
-Override defaults with environment variables or append any `run_joint.py` flags. For example, choose a different output drive/root:
+Use `--dry-run` to print the resolved experiment without training:
 
 ```bash
-AT_OUTPUT_ROOT=/Volumes/ResearchRuns/AnomalyTransformer EXP_NAME=experiment3_mps DEVICE=mps EPOCHS=5 bash run.sh --visualize
+python run.py --config configs/phase3/example_log_return.yaml --dry-run
 ```
 
-```bat
-set AT_OUTPUT_ROOT=D:\AnomalyTransformerRuns
-set DEVICE=cpu
-set EPOCHS=5
-run.bat --visualize
-```
+## Active Python Surface
 
-Gaussian log-return attention:
+The active code is organized by pipeline stage:
 
-```bat
-run_log_return_attention.bat --predictive-distribution student_t --visualize
-```
+- `main.py` - config dispatcher and experiment orchestration
+- `run.py` - thin executable entry point
+- `src/gbm/datasets.py` - data preparation and windows
+- `src/gbm/model.py` - model definitions
+- `src/gbm/score.py` - loss and score definitions
+- `src/gbm/train.py` - training
+- `src/gbm/test.py` - validation, testing, and score export
+- `src/gbm/visualize.py` - plots and visual diagnostics
+- `src/gbm/statistics.py` - statistics, baselines, and evaluation
+
+Experiment choices live in YAML, not in separate runner filenames.
+
+## General Configs
+
+Use these for normal reruns:
 
 ```bash
-bash run_log_return_attention.sh --predictive-distribution student_t --visualize
+python run.py --config configs/general/data_prepare.yaml
+python run.py --config configs/general/train.yaml
+python run.py --config configs/general/test.yaml
+python run.py --config configs/general/visualize.yaml
 ```
 
-Canonical GBM attention:
+## Configs By Phase
 
-```bat
-run_canonical_gbm_attention.bat --predictive-distribution student_t --visualize
+- `configs/general/` - routine data preparation, train, test, and k=9 MAD visualization configs
+- `configs/phase1/` - data preparation, data statistics, legacy/refactored score checks, loss ablation
+- `configs/phase2/` - distribution-shift score modes: legacy, refactored, QW2, QW2Tail
+- `configs/phase3/` - log-return/canonical model configs and association-mode ablations
+- `configs/phase4/` - MAD threshold visualization diagnostics
+- `configs/phase5/` - statistical baselines and score/component ablation
+
+Large outputs should go outside the repo. Recommended Windows output root:
+
+```powershell
+$env:AT_OUTPUT_ROOT = "D:/AnomalyTransformerRuns"
+python run.py --config configs/phase3/example_log_return.yaml
 ```
-
-```bash
-bash run_canonical_gbm_attention.sh --predictive-distribution student_t --visualize
-```
-
-By default, the joint data loader uses chronological splits with an embargo gap derived from the window size, fits normalization on training windows only, and trains only on normal training windows. Use `--include-anomalous-train` only for contamination ablations.
-
-Use `--association-mode none` for the no-prior Transformer ablation and `--association-mode temporal` for a local temporal-prior ablation.
-
-## Canonical GBM Attention Interpretation
-
-The canonical GBM mode uses the price process:
-
-```text
-dS_t = mu_t S_t dt + sigma_t S_t dW_t
-d log S_t = (mu_t - 0.5 sigma_t^2) dt + sigma_t dW_t
-```
-
-For each target time `i`, the model introduces an explicit latent source timestamp `J_i` over past timestamps `j < i` and computes:
-
-```text
-p(J_i = j | Delta L_{j->i}, theta) proportional to
-p(J_i = j) Normal(Delta L_{j->i}; sum_u alpha_u dt_u, sum_u sigma_u^2 dt_u)
-alpha_u = mu_u - 0.5 sigma_u^2
-```
-
-The candidate prior `p(J_i = j)` is uniform over past timestamps by default. The diagonal `i == j` is excluded from the continuous GBM transition density; the first row falls back to self mass only because no past timestamp exists yet. This makes the canonical path a mathematically explicit latent-index GBM transition posterior, not an unqualified Bayesian prior from GBM alone.
-
-## Device Support
-
-`DEVICE=auto` resolves in this order:
-
-```text
-cuda -> mps -> cpu
-```
-
-Use `--device mps` or `DEVICE=mps` on Mac M1/M2/M3. The entry points set `PYTORCH_ENABLE_MPS_FALLBACK=1` so unsupported MPS operations can fall back to CPU instead of crashing.
-
-## Mac M1/M2/M3 Setup
-
-Use the no-CUDA conda environment:
-
-```bash
-conda env create -f environment.macos-mps.yml
-conda activate gbm-anomaly-transformer-mps
-DEVICE=mps bash run.sh --visualize
-```
-
-For pip-based setup:
-
-```bash
-python -m venv .venv
-source .venv/bin/activate
-python -m pip install --upgrade pip
-python -m pip install -r requirements.txt
-DEVICE=mps bash run.sh --visualize
-```
-
-## Windows CUDA/CPU Setup
-
-Use your existing PyTorch install if it already matches your CUDA version. For CPU-only smoke checks, set:
-
-```bat
-set DEVICE=cpu
-run.bat --epochs 1
-```
-
-## Main Outputs
-
-```text
-%AT_OUTPUT_ROOT%/experiments/experiment3_joint/models/
-%AT_OUTPUT_ROOT%/experiments/experiment3_joint/reports/
-%AT_OUTPUT_ROOT%/experiments/experiment3_joint/splits/
-%AT_OUTPUT_ROOT%/experiments/experiment3_joint/visualizations/
-```
-
-Key report files:
-
-```text
-gbm_joint_score_summary.json
-gbm_joint_validation_scores.csv
-gbm_joint_test_scores_preview.csv
-gbm_joint_test_scores.csv
-gbm_joint_score_metrics.json
-gbm_joint_score_metrics_by_ticker.csv
-gbm_joint_score_summary_by_event_type.csv
-```
-
-`validate_joint.py` and `test_joint.py` export **per-window raw scores** and score-distribution summaries. Each row includes `reconstruction_error`, `nll`, `divergence`, `association_discrepancy`, and the combined `score`. For canonical GBM runs, `association_discrepancy` is the symmetric KL between learned attention and the GBM latent-timestamp posterior. Thresholding, conformal calibration, and score-change alerting are not part of the active joint pipeline; historical summaries live under `docs/legacy/gbm-report-summaries/`.
-
-## Legacy Context
-
-Only important old context was imported:
-
-```text
-docs/legacy/docs/
-docs/legacy/experiment-insights/
-docs/legacy/gbm-report-summaries/
-docs/legacy/ticker-insight-json/
-```
-
-Large generated outputs, checkpoints, logs, and image-heavy result folders were intentionally left out.
-
-## Agent And Codex Context
-
-Repo-local guidance lives in:
-
-```text
-AGENTS.md
-.codex/skills/gbm-anomaly-transformer/SKILL.md
-.github/copilot-instructions.md
-.github/agents/
-.github/instructions/
-.github/prompts/
-```
-
-Agents should treat `scripts/gbm/run_joint.py`, `src/gbm/device.py`, and this README as the current source of truth for running experiments.

@@ -1,0 +1,4 @@
+pipeline: score_ablation
+source_exp_name: canonical_gbm_attention
+output_exp_name: score_component_ablation
+variants: recon_only,association_kl_only,recon_plus_kl,full_default

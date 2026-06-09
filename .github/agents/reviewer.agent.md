@@ -21,7 +21,7 @@ Check that the project still matches these constraints:
 - Metrics: early warning recall first, then accuracy/F1/AUC, then interpretability.
 - Baselines: vanilla Anomaly Transformer, LSTM/GRU autoencoder, forecasting-based methods, and other anomaly baselines.
 - Publication target: IEEE-style AI/ML paper with finance relevance.
-- Runtime: active GBM joint pipeline in `scripts/gbm/`, with cross-platform runners and Apple Silicon MPS support.
+- Runtime: YAML-driven GBM pipeline through `run.py --config <yaml>`, with active code in `main.py` and `src/gbm/`.
 
 Also check current evidence status:
 - `docs/RESEARCH_QUESTION_ANSWER_MAP.md` is the current claim map.

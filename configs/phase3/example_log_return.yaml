@@ -1,0 +1,36 @@
+# Example flat YAML config for root run.py/main.py.
+# Run with:
+#   python run.py --config configs/phase3/example_log_return.yaml --dry-run
+
+pipeline: log_return
+exp_name: example_w{window_size}_log_return
+data_path: datasets/SP500_event_taxonomy_w{window_size}
+tickers: all
+device: auto
+features: all
+normalize_batch: false
+include_anomalous_train: false
+split_method: chronological
+batch_size: 32
+epochs: 1
+lr: 0.0001
+window_size: 100
+step: 1
+seed: 42
+d_model: 128
+n_heads: 4
+e_layers: 3
+d_ff: 256
+dropout: 0.1
+predictive_distribution: gaussian
+association_mode: gaussian_log_return
+patience: 5
+dist_weight: 1.0
+recon_weight: 1.0
+divergence_weight: 0.25
+association_weight: 0.1
+visualize: false
+show_true_labels: false
+full_context: false
+top_k: 10
+spike_percentile: 0.95

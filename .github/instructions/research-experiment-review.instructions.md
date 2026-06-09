@@ -1,6 +1,6 @@
 ---
 description: "Checklist for writing and reviewing publication-grade research experiment plans."
-applyTo: "{README.md,AGENTS.md,docs/legacy/**/*.md,scripts/gbm/**/*.py,src/gbm/**/*.py}"
+applyTo: "{README.md,AGENTS.md,configs/**/*.yaml,docs/**/*.md,main.py,run.py,src/gbm/**/*.py}"
 ---
 
 When writing or reviewing research experiment plans for this project, enforce the following standards:
@@ -16,7 +16,9 @@ When writing or reviewing research experiment plans for this project, enforce th
 - Interpretability claims must include faithfulness, stability, or other direct explanation checks.
 - Robustness must be tested across seeds, regimes, and stock subsets when relevant.
 - Do not weaken the evaluation standard to make results look better.
-- Run instructions should use the active GBM joint pipeline and `DEVICE=auto` unless a specific accelerator is required.
-- For Mac M1/M2/M3, prefer the `environment.macos-mps.yml` environment and `DEVICE=mps`.
+- Run instructions should use `python run.py --config <yaml>` and `device: auto` unless a specific accelerator is required.
+- Routine workflows should use `configs/general/`; phase-specific reruns should use `configs/phase1` through `configs/phase5`.
+- Do not add new one-off runner scripts for experiment variants.
+- For Mac M1/M2/M3, prefer the `environment.macos-mps.yml` environment and MPS when requested.
 
 If a plan lacks statistical support, mark it as incomplete rather than acceptable.

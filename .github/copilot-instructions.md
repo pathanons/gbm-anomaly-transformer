@@ -2,21 +2,33 @@
 description: "Workspace-wide agent instructions for gbm-anomaly-transformer"
 ---
 
-This repository is the active `gbm-anomaly-transformer` workspace. The current source of truth is the pooled joint GBM pipeline, not archived legacy paths.
+This repository is the active `gbm-anomaly-transformer` workspace. The current source of truth is the lean YAML-driven GBM pipeline, not archived legacy paths or deleted one-off runners.
 
 ## Active Run Path
 
-- Main runner: `scripts/gbm/run_joint.py`
-- Windows wrapper: `run.bat`
-- macOS/Linux wrapper: `run.sh`
-- Device helper: `src/gbm/device.py`
+- Single executable entry point: `run.py`
+- Single orchestration entry point: `main.py`
+- General configs: `configs/general/*.yaml`
+- Phase experiment configs: `configs/phase1` through `configs/phase5`
+- Device resolution: `src/gbm/train.py`
 - Mac Apple Silicon environment: `environment.macos-mps.yml`
 
-Use `DEVICE=auto` unless the user asks for a specific target. Auto resolves to CUDA, then Apple Silicon MPS, then CPU. For Mac M1/M2/M3, prefer `DEVICE=mps bash run.sh`.
+Use `device: auto` in YAML unless the user asks for a specific target. Auto resolves to CUDA, then Apple Silicon MPS, then CPU.
+
+Routine examples:
+
+```bash
+python run.py --config configs/general/data_prepare.yaml --dry-run
+python run.py --config configs/general/train.yaml --dry-run
+python run.py --config configs/general/test.yaml --dry-run
+python run.py --config configs/general/visualize.yaml --dry-run
+```
 
 ## Python Execution
 
 Do not assume a single global interpreter. Prefer the environment the user has activated. On Mac M1/M2/M3, use the `gbm-anomaly-transformer-mps` conda environment from `environment.macos-mps.yml`. On Windows, use the repo's active environment or the user's requested Conda environment.
+
+Do not add new one-off `run_*.py`, `*_joint.py`, `visualize_*.py`, or experiment-specific Python entry points. Add variants as YAML configs and reusable options in the existing stage files.
 
 ## Research Constraints
 
