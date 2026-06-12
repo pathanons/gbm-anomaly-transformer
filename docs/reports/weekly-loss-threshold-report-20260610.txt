@@ -1,0 +1,467 @@
+สรุปรายงานประจำสัปดาห์: Loss Component Diagnostics และ MAD Thresholding
+วันที่จัดทำ: 2026-06-10
+
+ภาพรวม
+
+ช่วงที่ผ่านมา งานหลักไม่ได้อยู่ที่การเพิ่ม model ใหม่โดยตรง แต่อยู่ที่การตรวจสอบว่า anomaly score ที่เราใช้อยู่ประกอบจากอะไรบ้าง แต่ละ score/loss component มีพฤติกรรมทางสถิติอย่างไร และการทำ threshold ด้วย delta score + MAD มีเหตุผลพอจะใช้เป็น diagnostic สำหรับ jump/drop anomaly หรือไม่
+
+ประเด็นสำคัญคือ score แบบเดิมที่รวมหลาย loss components เข้าด้วยกันโดยตรง อาจไม่ใช่ score ที่ดีสำหรับ anomaly detection เพราะแต่ละ component มี scale, distribution, และ tail behavior ต่างกันมาก ถ้านำมาบวกกันตรงๆ term ที่มี outlier ใหญ่จะครอบงำ score ทั้งหมด ทำให้ signal จาก term อื่นถูกกลบ
+
+ดังนั้น สิ่งที่เราทำในช่วงนี้คือ:
+
+1. แยกดู loss/score components รายตัว
+2. ตรวจสอบว่า component ไหนมี signal และ component ไหนทำให้ aggregate score noisy หรือ scale-unstable
+3. ทดลองคิด score ที่ตีความได้ง่ายกว่า คือ nll + association_discrepancy
+4. normalize score ด้วย robust z-score
+5. ใช้ absolute delta score เพื่อจับการเปลี่ยนแปลงฉับพลัน
+6. ใช้ median + k * MAD เป็น threshold แบบ robust
+7. ตรวจสอบว่า k=9 MAD ให้ภาพ diagnostic ที่สะอาดกว่า k=3 หรือไม่
+
+
+1. ทำไมต้องแยกดู loss/score components รายตัว
+
+เดิม score แบบ legacy รวมหลายส่วนเข้าด้วยกัน เช่น:
+
+total score = reconstruction + nll + divergence + association discrepancy
+
+แต่ละ component มีความหมายคนละแบบ:
+
+- reconstruction_error วัดว่า input window reconstruct ยากแค่ไหน
+- nll วัดว่า observed return ไม่น่าจะเกิดภายใต้ predicted distribution แค่ไหน
+- divergence วัดความไม่สอดคล้องระหว่าง observed return distribution กับ predicted distribution
+- association_discrepancy วัดว่า learned attention/association pattern เบี่ยงจาก finance-aware หรือ temporal prior มากแค่ไหน
+
+ในเชิง concept การรวมหลาย component ดูสมเหตุสมผล เพราะ anomaly ทางการเงินอาจเกิดได้หลายรูปแบบ เช่น return ผิดปกติ, volatility เปลี่ยน, reconstruction ยาก, หรือ association pattern เปลี่ยน แต่ปัญหาคือการบวก term เหล่านี้ตรงๆ ต้องสมมติว่าแต่ละ term อยู่ใน scale ที่ compatible กัน ซึ่ง artifact ที่ตรวจสอบแสดงว่าไม่จริง
+
+ตัวเลขสำคัญจาก component diagnostics:
+
+reconstruction_error median = 0.122771
+reconstruction_error max    = 7469.848145
+
+nll median = -2.634786
+nll max    = -1.225939
+
+association_discrepancy median = 0.411030
+association_discrepancy max    = 3.618039
+
+total legacy score median = -2.334158
+total legacy score max    = 7467.566895
+
+สิ่งที่เห็นคือ total legacy score มี maximum เกือบเท่ากับ reconstruction_error maximum โดยตรง แปลว่า score สุดท้ายถูกลากโดย reconstruction outlier มากกว่าจะเป็น evidence รวมจากทุก component จริงๆ
+
+
+2. เหตุผลเชิงสถิติว่าทำไมบาง component กลบ signal
+
+ปัญหาหลักไม่ใช่แค่ว่า component บางตัว noisy แต่คือ distribution ของ component แต่ละตัวไม่ compatible กันสำหรับการบวกแบบ raw weighted sum
+
+ถ้า term หนึ่งมี heavy tail มาก เช่น median ต่ำมากแต่ maximum สูงระดับหลายพัน term นั้นจะ dominate aggregate score ถึงแม้จะใส่น้ำหนักเท่ากับ term อื่น หรือแม้ใส่น้ำหนักน้อยกว่าก็ตาม ส่วน term ที่มี dynamic range เล็กกว่า เช่น nll หรือ association_discrepancy จะถูกกลบจนแทบไม่มีผลต่อ ranking
+
+ในเชิงสถิติ นี่เป็นปัญหา scale incompatibility และ tail-risk domination:
+
+- scale incompatibility: แต่ละ term ไม่ได้อยู่ในหน่วยหรือช่วงค่าที่เทียบกันได้
+- heavy-tail domination: rare extreme values ของ term หนึ่งลาก aggregate score ทั้งหมด
+- calibration failure: weight ที่ใส่ไว้ไม่ได้ guarantee ว่า term นั้นมี influence ตามที่ต้องการ
+- ranking distortion: anomaly ranking ถูกกำหนดโดย outlier ของ component เดียว แทนที่จะสะท้อน combined evidence
+
+ดังนั้นเหตุผลที่เราตัดหรือ down-weight บาง term จาก final anomaly score คือ:
+
+1. scale ไม่เข้ากันกับ term อื่น
+2. outlier ใหญ่เกินจนลาก aggregate score
+3. สร้าง score drift ยาวๆ แทนที่จะเป็น localized anomaly spike
+4. ทำให้ score มี local peaks เยอะเกินและตีความยาก
+5. ไม่ได้ช่วยให้ anomaly localization ชัดขึ้นใน visual diagnostics
+
+จุดนี้ควรเขียนใน report ว่าเป็นปัญหาเชิง calibration และ scale incompatibility ไม่ใช่แค่ "term นี้เป็น noise เลยเอาออก"
+
+
+3. สิ่งที่ claim ได้ และสิ่งที่ยังไม่ควร claim
+
+สิ่งที่ claim ได้:
+
+The component-level diagnostics show that the raw legacy aggregate score is often dominated by scale-unstable components, especially reconstruction error. This motivates removing or down-weighting these terms from the final anomaly score, while keeping them as candidates for training-loss ablation or diagnostic analysis.
+
+แปลเป็นไทยได้ว่า:
+
+ผลการตรวจสอบราย component แสดงว่า raw legacy aggregate score มักถูกครอบงำโดย component ที่ scale ไม่เสถียร โดยเฉพาะ reconstruction error ดังนั้นจึงมีเหตุผลที่จะ remove หรือ down-weight term เหล่านี้จาก final anomaly score แต่ยังควรเก็บไว้เป็น candidate สำหรับ training-loss ablation หรือ diagnostic analysis
+
+สิ่งที่ยังไม่ควร claim:
+
+Reconstruction and divergence are useless.
+
+เพราะยังเป็นไปได้ว่า reconstruction หรือ divergence ช่วยระหว่าง training ทำให้ representation ดีขึ้น เพียงแต่ไม่เหมาะจะถูกใช้เป็น raw final anomaly score โดยตรง
+
+ดังนั้น distinction ที่ควรชัดคือ:
+
+- Training loss: term บางตัวอาจช่วย model learn representation
+- Final anomaly score: term เดียวกันอาจ noisy หรือ scale-unstable เกินไปสำหรับ inference
+
+นี่คือเหตุผลว่าทำไมเราจึงไม่ควรพูดว่า "ตัด loss นี้ออกทั้งหมด" แต่ควรพูดว่า "ไม่ใช้เป็น raw final scoring component จนกว่าจะมี normalization, validation-selected weighting, และ ablation evidence"
+
+
+4. ทำไมเลือกใช้ nll + association_discrepancy
+
+หลังจากดู component shape แล้ว nll กับ association_discrepancy ดูเหมาะกว่าในฐานะ diagnostic score เพราะมีความหมายชัดและ scale ไม่ระเบิดเท่า reconstruction
+
+nll มีความหมายว่า observed return surprise แค่ไหนเมื่อเทียบกับ distribution ที่ model predict:
+
+S_point,t = -log p(r_t | x_{t-T:t-1})
+
+ถ้า nll สูง แปลว่า return จริงไม่น่าจะเกิดภายใต้ distribution ที่ model คาดไว้ จึงเป็น predictive anomaly signal
+
+association_discrepancy มีความหมายว่า learned association pattern เบี่ยงจาก expected temporal/financial association มากแค่ไหน เช่น attention ไม่สอดคล้องกับ prior ที่ตั้งจาก log-return หรือ GBM-inspired structure
+
+ดังนั้น nll + association_discrepancy ตีความได้ว่า:
+
+An anomaly is a window where the observed return is unlikely under the predicted distribution and/or the learned association pattern becomes inconsistent with the expected financial-temporal structure.
+
+หรือในภาษาไทย:
+
+anomaly คือ window ที่ return จริงไม่น่าจะเกิดภายใต้ distribution ที่ model คาด และ/หรือ association pattern ของ model เบี่ยงจากโครงสร้างทางเวลา/การเงินที่คาดหวัง
+
+ข้อดีคือ score นี้ไม่ใช่แค่ reconstruction error แบบ autoencoder ทั่วไป แต่รวม predictive surprise กับ association inconsistency เข้าด้วยกัน
+
+
+5. ทำไมต้องใช้ robust z-score ก่อน
+
+แม้ nll และ association_discrepancy จะ stable กว่า reconstruction แต่ทั้งสอง term ก็ยังมี scale และ distribution ต่างกัน การรวมกันตรงๆ จึงยังมีปัญหาได้
+
+เราจึง normalize ด้วย robust z-score:
+
+robust_z = (score - median(score)) / (1.4826 * MAD(score) + epsilon)
+
+เหตุผลที่ใช้ median และ MAD แทน mean และ standard deviation คือ financial data และ model scores มักมี heavy tail และ outlier เยอะ ถ้าใช้ mean/std ค่า threshold หรือ normalization จะถูกลากโดย extreme values ได้ง่าย
+
+MAD ย่อมาจาก median absolute deviation:
+
+MAD = median(|x_i - median(x)|)
+
+ตัวคูณ 1.4826 เป็น scaling factor ที่ทำให้ MAD comparable กับ standard deviation ภายใต้ normal distribution แต่ยังรักษาความ robust ต่อ outlier
+
+ดังนั้น robust z-score ทำให้ score อยู่ในหน่วยที่ตีความได้มากขึ้นว่า "สูงผิดปกติเมื่อเทียบกับ typical variation ของ series นี้มากแค่ไหน"
+
+
+6. ทำไมใช้ delta score แทน raw score level
+
+การใช้ raw score level มีปัญหาหลายอย่าง:
+
+1. บาง ticker อาจมี baseline score สูงกว่าตัวอื่น
+2. score อาจ drift สูงเป็นเวลานานโดยไม่บอก onset ที่ชัด
+3. regime shift อาจทำให้ score level เปลี่ยนแบบค่อยเป็นค่อยไป
+4. threshold จาก level ตรงๆ อาจ flag เพราะ baseline สูง ไม่ใช่เพราะมี anomaly transition
+
+เราจึงดูการเปลี่ยนแปลงของ score:
+
+delta_score_t = abs(score_t - score_{t-1})
+
+แนวคิดคือ jump/drop anomaly มักปรากฏเป็น transition หรือ abrupt change ไม่ใช่แค่ level สูงคงที่ การดู delta score จึงช่วยจับจุดที่ model เปลี่ยนความเชื่ออย่างฉับพลัน เช่น จาก normal-like behavior ไปเป็น stressed behavior
+
+ในเชิงสถิติ delta score ทำหน้าที่คล้าย change detector:
+
+- ลดผลของ slow baseline drift
+- เน้น discontinuity หรือ abrupt transition
+- ทำให้เราดู score dynamics มากกว่า score level
+- เหมาะกับโจทย์ jump/drop ที่สนใจ anomaly onset หรือ transition point
+
+ดังนั้นการใช้ delta score ไม่ได้มาจาก exact closed-form solution ของ loss ว่า "ต้องใช้ delta" แต่เป็นเหตุผลเชิง signal processing และ robust anomaly detection ว่า score change อาจ localize event onset ได้ดีกว่า raw score level
+
+
+7. ทำไมใช้ MAD threshold
+
+หลังจากได้ delta score เราต้องนิยามว่า jump แค่ไหนถึงถือว่าผิดปกติ ถ้าใช้ threshold แบบ mean + k * std จะมีปัญหาเพราะ delta score มัก heavy-tailed และมี outlier เยอะ
+
+จึงใช้ robust threshold:
+
+threshold = median(delta_score) + k * 1.4826 * MAD(delta_score)
+
+ความหมายคือ flag เฉพาะ score jump ที่ใหญ่ผิดปกติเมื่อเทียบกับ typical score fluctuation ของ series นั้น
+
+ข้อดีของ MAD threshold:
+
+1. robust ต่อ outlier
+2. เหมาะกับ heavy-tailed score distribution
+3. ปรับ threshold ตาม distribution ของ score/delta score เอง
+4. ไม่ต้องสมมติว่า score เป็น normal อย่างเข้มงวด
+5. ใช้เป็น conservative diagnostic ได้ง่ายและตีความตรงไปตรงมา
+
+ในบริบทนี้ MAD threshold จึงทำหน้าที่เป็น robust outlier detector บน delta score
+
+
+8. ทำไม k=9 ดูโอเค แต่ยังไม่ใช่ final threshold
+
+จาก diagnostic เทียบ k=3 กับ k=9:
+
+k=3:
+model spikes = 12,375
+overlaps = 2,438
+overlap per spike = 19.70%
+coverage = 89.17%
+
+k=9:
+model spikes = 3,336
+overlaps = 1,407
+overlap per spike = 42.18%
+coverage = 51.46%
+
+แปลว่า k=9 conservative กว่ามาก:
+
+- ลดจำนวน model spikes จาก 12,375 เหลือ 3,336
+- ลด spike noise ประมาณ 73%
+- เพิ่ม overlap per spike จาก 19.70% เป็น 42.18%
+- แต่ coverage ลดจาก 89.17% เหลือ 51.46%
+
+ดังนั้น k=9 ไม่ได้ดีกว่า k=3 ในทุกมิติ แต่เป็น trade-off:
+
+- k=3: recall/coverage สูงกว่า แต่มี false หรือ low-confidence flags เยอะ
+- k=9: precision-like quality สูงกว่า ภาพสะอาดกว่า แต่ miss anomaly starts มากกว่า
+
+สิ่งที่ควร claim คือ:
+
+k=9 MAD provides a cleaner and more conservative visualization threshold than k=3, improving overlap-per-spike at the cost of lower anomaly-start coverage. It should be treated as a diagnostic choice until k is selected using validation-only threshold sweep.
+
+หรือภาษาไทย:
+
+k=9 MAD เป็น threshold สำหรับ visualization/diagnostic ที่ conservative และให้ spike ที่สะอาดกว่า k=3 โดยเพิ่มสัดส่วน overlap ต่อ spike แต่แลกกับ coverage ที่ลดลง ดังนั้นยังไม่ควรถูกเรียกว่า final threshold จนกว่าจะเลือก k ด้วย validation-only sweep
+
+
+9. เหตุผลว่าทำไมยังต้อง validation-only threshold sweep
+
+ตอนนี้ k=9 ถูกเลือกจาก diagnostic และ visual inspection ว่าภาพสะอาดกว่า ไม่ใช่จาก protocol ที่ lock แล้ว ดังนั้นยังไม่สามารถ claim ได้ว่า k=9 เป็น optimal threshold
+
+ขั้นตอนที่ควรทำต่อคือ:
+
+1. sweep ค่า k บน validation set เช่น k in {3, 5, 7, 9, 11, 12, 15}
+2. เลือก k จาก validation metrics เท่านั้น
+3. lock threshold rule
+4. evaluate test set เพียงครั้งเดียว
+5. report event-level recall, detection delay, false alarms, ROC-AUC, PR-AUC, และ confidence intervals
+
+เหตุผลคือ test set ห้ามใช้เลือก threshold เพราะจะกลายเป็น tuning on test และทำให้ claim ไม่ defensible
+
+
+10. สรุปใจความสำหรับใส่ report
+
+ช่วงที่ผ่านมาเราเน้นตรวจสอบความน่าเชื่อถือของ anomaly score มากกว่าการเพิ่ม model ใหม่ ผลคือพบว่า raw legacy score มีปัญหาเพราะ component หลายตัวมี scale และ tail behavior ไม่เข้ากัน โดยเฉพาะ reconstruction error ที่มี outlier ใหญ่จน dominate total score การรวม loss terms แบบตรงๆ จึงทำให้ signal ที่ควรจะมาจาก predictive likelihood และ association discrepancy ถูกกลบ
+
+จากนั้นเราย้ายไปใช้ diagnostic score ที่ตีความง่ายกว่า คือ robust-z ของ nll + association_discrepancy และใช้ absolute delta score เพื่อจับ abrupt transition แทนการดู score level โดยตรง Threshold ใช้ median + k * MAD เพราะ robust ต่อ outlier และเหมาะกับ heavy-tailed financial scores
+
+ผล k=9 MAD แสดงว่า threshold ที่ conservative ขึ้นลด spike noise ได้มาก และเพิ่มคุณภาพของ flagged spikes แต่ยังต้องระวังว่า k=9 ยังไม่ได้ถูกเลือกด้วย validation protocol จึงควรถือเป็น diagnostic evidence ไม่ใช่ final detector proof
+
+
+11. Suggested wording for report
+
+สามารถใช้ย่อหน้านี้ใน report ได้:
+
+This week, we focused on diagnosing the statistical behavior of the anomaly score rather than introducing a new model variant. The original legacy score combines reconstruction error, predictive negative log-likelihood, distribution discrepancy, and association discrepancy. Component-level inspection showed that these terms are not scale-compatible: reconstruction error is extremely heavy-tailed and can dominate the aggregate score, causing the final score to reflect reconstruction outliers rather than a balanced anomaly signal. Therefore, we moved toward a cleaner diagnostic score based on robustly normalized predictive NLL and association discrepancy.
+
+To better localize abrupt jump/drop transitions, we analyzed the absolute first difference of the robust score instead of the raw score level. This turns the detector into a score-change diagnostic, emphasizing sudden transitions while reducing the effect of slow score drift and ticker-specific baseline offsets. We then applied a robust threshold based on median + k * MAD, which is more appropriate than mean/std thresholding for heavy-tailed financial scores.
+
+The k=9 MAD rule produced a more conservative and cleaner diagnostic than k=3: it reduced model spikes substantially and improved overlap-per-spike, although it also reduced anomaly-start coverage. Therefore, k=9 should currently be interpreted as a useful visualization and diagnostic threshold, not as a final validated decision rule. A defensible final detector still requires validation-only threshold selection, locked test evaluation, baseline comparisons, and uncertainty reporting.
+
+
+12. Short version
+
+สรุปสั้น:
+
+เราแยกตรวจสอบ loss/score components แล้วพบว่า raw legacy score ถูก dominate โดย component ที่ scale ไม่เสถียร โดยเฉพาะ reconstruction error ทำให้ signal จาก nll และ association discrepancy ถูกกลบ จึงเปลี่ยนมาใช้ robust-z(nll + association_discrepancy) เป็น diagnostic score
+
+จากนั้นใช้ abs(delta score) เพื่อจับ abrupt transition แทน raw score level และใช้ median + k * MAD เป็น robust threshold เพราะ financial scores มี heavy tail และ outlier เยอะ k=9 ให้ผลที่ conservative และสะอาดกว่า k=3 โดย overlap-per-spike สูงขึ้น แต่ coverage ลดลง ดังนั้น k=9 เป็น diagnostic threshold ที่ดีขึ้น แต่ยังไม่ใช่ final threshold จนกว่าจะเลือกด้วย validation-only sweep
+
+
+13. Evidence checklist: ไฟล์ที่ควรใช้ยืนยันรายงานนี้
+
+เวลาเอารายงานนี้ไปใช้ต่อ ควรมี evidence package แยกตาม claim เพื่อให้ตอบคำถามได้ว่าแต่ละข้อสรุปมาจาก artifact ไหน ไม่ใช่อาศัยแค่ summary text อย่างเดียว
+
+
+13.1 ไฟล์รายงานหลักใน repo
+
+ควรแนบหรืออ้างอิงไฟล์เหล่านี้:
+
+docs/reports/weekly-loss-threshold-report-20260610.txt
+docs/reports/phase2-loss-component-noise-report-20260610.md
+docs/reports/mad-k9-jumpdrop-diagnostic-report-20260610.md
+docs/research-note-20260610.md
+docs/RESEARCH_QUESTION_ANSWER_MAP.md
+
+หน้าที่ของแต่ละไฟล์:
+
+- weekly-loss-threshold-report-20260610.txt: สรุปภาษาไทยสำหรับใช้อธิบายภาพรวม
+- phase2-loss-component-noise-report-20260610.md: evidence หลักเรื่อง component noise และ scale instability
+- mad-k9-jumpdrop-diagnostic-report-20260610.md: evidence หลักเรื่อง delta score และ k=9 MAD diagnostic
+- research-note-20260610.md: context รวมของ pipeline, model, loss, scoring, baselines, และข้อจำกัด
+- RESEARCH_QUESTION_ANSWER_MAP.md: ใช้เช็กว่า claim ไหนตอบแล้ว claim ไหนยัง open
+
+
+13.2 Evidence สำหรับ claim เรื่อง loss/score component noise
+
+Claim ที่ต้องการยืนยัน:
+
+Raw legacy aggregate score ถูก dominate โดย component ที่ scale ไม่เสถียร โดยเฉพาะ reconstruction_error ทำให้ signal จาก nll และ association_discrepancy ถูกกลบ
+
+ควรมีไฟล์ raw/summary เหล่านี้:
+
+D:/AnomalyTransformerRuns/findings/phase2_diststudy_legacy_model_score_legacy/reports/gbm_joint_test_scores.csv
+D:/AnomalyTransformerRuns/findings/phase2_diststudy_legacy_model_score_legacy/reports/gbm_joint_score_summary.json
+D:/AnomalyTransformerRuns/findings/phase2_diststudy_legacy_model_score_legacy/reports/gbm_joint_score_metrics.json
+D:/AnomalyTransformerRuns/findings/phase2_diststudy_legacy_model_score_legacy/reports/gbm_joint_score_metrics_by_ticker.csv
+D:/AnomalyTransformerRuns/findings/phase2_diststudy_legacy_model_score_legacy/reports/gbm_joint_score_pattern_overall.json
+D:/AnomalyTransformerRuns/findings/phase2_diststudy_legacy_model_score_legacy/reports/gbm_joint_score_pattern_summary_by_ticker.csv
+
+ไฟล์ที่สำคัญที่สุดคือ:
+
+D:/AnomalyTransformerRuns/findings/phase2_diststudy_legacy_model_score_legacy/reports/gbm_joint_test_scores.csv
+
+เหตุผล:
+
+ไฟล์นี้ใช้ยืนยันตัวเลขราย component เช่น median, p95, p99, max ของ reconstruction_error, nll, divergence, association_discrepancy, และ total legacy score โดยเฉพาะตัวเลขสำคัญ:
+
+reconstruction_error median = 0.122771
+reconstruction_error max    = 7469.848145
+total legacy score median   = -2.334158
+total legacy score max      = 7467.566895
+
+ตัวเลขนี้เป็นหลักฐานว่า total score inherit extreme outlier behavior จาก reconstruction_error
+
+
+13.3 รูปตัวอย่างสำหรับ claim เรื่อง component noise
+
+ควรมีรูปตัวอย่าง 3-4 tickers:
+
+D:/AnomalyTransformerRuns/findings/phase2_diststudy_legacy_model_score_legacy/visualizations_phase2_ticker_scores/BKNG_phase2_score_shape.png
+D:/AnomalyTransformerRuns/findings/phase2_diststudy_legacy_model_score_legacy/visualizations_phase2_ticker_scores/AAPL_phase2_score_shape.png
+D:/AnomalyTransformerRuns/findings/phase2_diststudy_legacy_model_score_legacy/visualizations_phase2_ticker_scores/LULU_phase2_score_shape.png
+D:/AnomalyTransformerRuns/findings/phase2_diststudy_legacy_model_score_legacy/visualizations_phase2_ticker_scores/ADBE_phase2_score_shape.png
+
+เหตุผลที่เลือก:
+
+- BKNG: ใช้โชว์ scale explosion ชัดมาก total score drift ไปเป็นหลักพัน
+- AAPL: ใช้โชว์ broad score hump และ divergence spike
+- LULU: ใช้โชว์ reconstruction/divergence spikes ที่ลาก total score ให้ noisy
+- ADBE: ใช้โชว์หลาย component spikes และ score bursts ที่ตีความยาก
+
+รูปเหล่านี้ช่วยยืนยันเชิง visual ว่า problem ไม่ใช่แค่ตัวเลข max สูง แต่ score shape เองไม่ clean พอสำหรับ final decision boundary
+
+
+13.4 Evidence สำหรับ claim เรื่อง delta score และ k=9 MAD
+
+Claim ที่ต้องการยืนยัน:
+
+k=9 MAD เป็น conservative diagnostic threshold ที่ลด low-confidence model spikes และเพิ่ม overlap-per-spike เมื่อเทียบกับ k=3 แต่แลกกับ coverage ที่ลดลง
+
+ควรมีไฟล์:
+
+D:/AnomalyTransformerRuns/experiments/jumpdrop_w100_thres1_nllassoc/thres_outlier_mad_k9/final_summary.csv
+D:/AnomalyTransformerRuns/experiments/jumpdrop_w100_thres1_nllassoc/reports/gbm_joint_score_metrics.json
+D:/AnomalyTransformerRuns/experiments/jumpdrop_w100_thres1_nllassoc/reports/gbm_joint_score_summary.json
+D:/AnomalyTransformerRuns/experiments/jumpdrop_w100_thres1_nllassoc/reports/gbm_joint_score_summary_by_event_type.csv
+
+ไฟล์ที่สำคัญที่สุดคือ:
+
+D:/AnomalyTransformerRuns/experiments/jumpdrop_w100_thres1_nllassoc/thres_outlier_mad_k9/final_summary.csv
+
+เหตุผล:
+
+ไฟล์นี้สรุปจำนวน model spikes, price anomaly starts, overlaps, overlap per model spike, และ coverage ราย ticker รวมถึง aggregate summary across 107 tickers
+
+ตัวเลขสำคัญของ k=9:
+
+model spikes = 3,336
+price anomaly starts = 2,734
+overlaps = 1,407
+overlap per model spike = 42.18%
+price anomaly coverage = 51.46%
+
+
+13.5 Evidence เปรียบเทียบ k=3 กับ k=9
+
+ถ้ามี artifact ของ k=3 ควรเก็บคู่กับ k=9 เพราะเป็นหลักฐานตรงที่สุดของ trade-off:
+
+k=3:
+model spikes = 12,375
+overlaps = 2,438
+overlap per spike = 19.70%
+coverage = 89.17%
+
+k=9:
+model spikes = 3,336
+overlaps = 1,407
+overlap per spike = 42.18%
+coverage = 51.46%
+
+การเปรียบเทียบนี้ใช้ยืนยันว่า k=9 ไม่ได้ simply "ดีกว่า" k=3 แต่เป็น threshold ที่ conservative กว่า:
+
+- spike ลดลงมาก
+- overlap-per-spike สูงขึ้น
+- coverage ลดลง
+
+ดังนั้น conclusion ที่ถูกต้องคือ k=9 เหมาะเป็น clean diagnostic visualization threshold แต่ยังไม่ใช่ final selected threshold
+
+
+13.6 รูปตัวอย่างสำหรับ claim เรื่อง k=9 MAD
+
+ควรมีรูปตัวอย่าง:
+
+D:/AnomalyTransformerRuns/experiments/jumpdrop_w100_thres1_nllassoc/thres_outlier_mad_k9/IBM_final_final.png
+D:/AnomalyTransformerRuns/experiments/jumpdrop_w100_thres1_nllassoc/thres_outlier_mad_k9/LULU_final_final.png
+D:/AnomalyTransformerRuns/experiments/jumpdrop_w100_thres1_nllassoc/thres_outlier_mad_k9/CMG_final_final.png
+D:/AnomalyTransformerRuns/experiments/jumpdrop_w100_thres1_nllassoc/thres_outlier_mad_k9/AAPL_final_final.png
+
+เหตุผลที่เลือก:
+
+- IBM: overlap สูง เหมาะเป็น strong example
+- LULU: coverage ดีมาก เหมาะแสดงว่าบาง ticker จับ anomaly starts ได้ดี
+- CMG: overlap-per-spike ดี เหมาะแสดง precision-like behavior
+- AAPL: limitation example ที่ดี เพราะ conservative threshold miss หลาย anomaly starts
+
+ควรมีทั้ง good examples และ limitation example เพื่อให้ report balanced และไม่ overclaim
+
+
+13.7 Evidence ที่ควรมีเพิ่มเพื่อให้ claim แข็งขึ้น
+
+ไฟล์ที่ยังควรสร้างเพิ่มในรอบถัดไป:
+
+validation_threshold_sweep.csv
+test_predictions_locked_threshold.csv
+baseline_comparison_summary.csv
+multi_seed_summary.csv
+
+รายละเอียด:
+
+validation_threshold_sweep.csv
+- ใช้เลือก k จาก validation set เท่านั้น
+- ควรมี k เช่น 3, 5, 7, 9, 11, 12, 15
+- ควรรายงาน precision-like metric, coverage/recall, event-level recall, false alarms, detection delay
+
+test_predictions_locked_threshold.csv
+- ใช้เก็บผล test หลังจาก lock threshold แล้ว
+- ควรมี schema ประมาณ:
+  ticker, date/start_date/end_date, split, y_true, score, threshold, y_pred
+
+baseline_comparison_summary.csv
+- ใช้เทียบ proposed score กับ statistical baselines ภายใต้ split และ threshold protocol เดียวกัน
+- ควรมี rolling volatility, EWMA volatility, return z-score, CUSUM, และ baseline อื่นเท่าที่ implement แล้ว
+
+multi_seed_summary.csv
+- ใช้รายงาน mean, standard deviation, confidence interval, และ seed-level variation
+- สำคัญมากถ้าจะ claim improvement หรือ robustness
+
+
+13.8 Evidence package แบบสั้นที่สุดที่ควรมี
+
+ถ้าต้องเตรียมไฟล์แบบ minimum สำหรับคุยกับอาจารย์หรือใส่ประกอบ report ควรมี:
+
+1. docs/reports/weekly-loss-threshold-report-20260610.txt
+2. docs/reports/phase2-loss-component-noise-report-20260610.md
+3. docs/reports/mad-k9-jumpdrop-diagnostic-report-20260610.md
+4. D:/AnomalyTransformerRuns/findings/phase2_diststudy_legacy_model_score_legacy/reports/gbm_joint_test_scores.csv
+5. D:/AnomalyTransformerRuns/experiments/jumpdrop_w100_thres1_nllassoc/thres_outlier_mad_k9/final_summary.csv
+6. รูป BKNG หรือ AAPL สำหรับ component noise
+7. รูป IBM หรือ LULU สำหรับ k=9 MAD success case
+8. รูป AAPL สำหรับ k=9 MAD limitation case
+
+ชุดนี้พอจะยืนยันได้ว่า:
+
+- ทำไม raw legacy score มีปัญหา
+- ทำไม reconstruction/divergence ไม่ควรถูกใช้เป็น raw final score โดยไม่ calibrate
+- ทำไม robust-z(nll + association_discrepancy) น่าใช้เป็น diagnostic score
+- ทำไม abs(delta score) เหมาะกับ transition detection
+- ทำไม k=9 MAD สะอาดกว่า k=3 แต่ยังไม่ใช่ final threshold
