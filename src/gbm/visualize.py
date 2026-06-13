@@ -64,10 +64,153 @@ class SpikeSummary:
     outpath: str
 
 
+@dataclass(frozen=True)
+class AttentionPlotSummary:
+    ticker: str
+    window_id: int
+    layer: int
+    head: int
+    endpoint_top_lag: int
+    endpoint_top_weight: float
+    endpoint_l1_mean: float
+    outpath: str
+
+
 def parse_csv_list(value: str | None, default: Iterable[str] | None = None) -> list[str]:
     if value is None:
         return list(default or [])
     return [item.strip() for item in value.split(",") if item.strip()]
+
+
+def _resolve_attention_index(value, size: int, name: str) -> int:
+    if isinstance(value, str) and value.lower() == "last":
+        return size - 1
+    index = int(value)
+    if index < 0:
+        index = size + index
+    if index < 0 or index >= size:
+        raise ValueError(f"{name} index out of range: {value} for size {size}")
+    return index
+
+
+def _date_tick_positions(dates: np.ndarray, count: int = 6) -> tuple[np.ndarray, list[str]]:
+    length = len(dates)
+    if length == 0:
+        return np.asarray([], dtype=int), []
+    positions = np.linspace(0, length - 1, num=min(count, length), dtype=int)
+    labels = [str(pd.to_datetime(dates[pos]).date()) for pos in positions]
+    return positions, labels
+
+
+def plot_attention_window(
+    manifest_row: pd.Series,
+    outdir: Path,
+    layer: int | str = 0,
+    head: int | str = 0,
+) -> AttentionPlotSummary:
+    data_path = Path(str(manifest_row["attention_npz"]))
+    if not data_path.exists():
+        raise FileNotFoundError(f"Missing attention artifact: {data_path}")
+    payload = np.load(data_path, allow_pickle=False)
+    series_all = payload["series"]
+    prior_all = payload["prior"]
+    dates = payload["dates"]
+    association_mode = str(manifest_row.get("association_mode", "GBM"))
+    prior_title = f"{association_mode} prior attention"
+    layer_idx = _resolve_attention_index(layer, series_all.shape[0], "layer")
+    head_idx = _resolve_attention_index(head, series_all.shape[1], "head")
+    series = series_all[layer_idx, head_idx]
+    prior = prior_all[layer_idx, head_idx]
+    diff_abs = np.abs(series - prior)
+    endpoint_series = series[-1]
+    endpoint_prior = prior[-1]
+    endpoint_diff = np.abs(endpoint_series - endpoint_prior)
+
+    outdir.mkdir(parents=True, exist_ok=True)
+    ticker = str(manifest_row["ticker"])
+    window_id = int(manifest_row["window_id"])
+    outpath = outdir / f"{ticker}_window{window_id}_layer{layer_idx}_head{head_idx}.png"
+
+    fig, axes = plt.subplots(
+        2,
+        3,
+        figsize=(15, 8),
+        gridspec_kw={"height_ratios": [1.0, 0.65]},
+    )
+    ax_series, ax_prior, ax_diff = axes[0]
+    ax_profile, ax_delta, ax_text = axes[1]
+    vmax = max(float(series.max()), float(prior.max()), 1e-8)
+    diff_vmax = max(float(diff_abs.max()), 1e-8)
+    image_specs = [
+        (ax_series, series, "Learned series attention", vmax, "viridis"),
+        (ax_prior, prior, prior_title, vmax, "viridis"),
+        (ax_diff, diff_abs, "|series - prior|", diff_vmax, "magma"),
+    ]
+    for ax, matrix, title, max_value, cmap in image_specs:
+        im = ax.imshow(matrix, aspect="auto", origin="upper", vmin=0.0, vmax=max_value, cmap=cmap)
+        ax.set_title(title)
+        ax.set_xlabel("Key date")
+        ax.set_ylabel("Query date")
+        fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+    tick_positions, tick_labels = _date_tick_positions(dates)
+    for ax in (ax_series, ax_prior, ax_diff):
+        ax.set_xticks(tick_positions)
+        ax.set_xticklabels(tick_labels, rotation=35, ha="right", fontsize=8)
+        ax.set_yticks(tick_positions)
+        ax.set_yticklabels(tick_labels, fontsize=8)
+
+    x = np.arange(len(endpoint_series))
+    ax_profile.plot(x, endpoint_series, label="series endpoint", color="#1f77b4", linewidth=1.4)
+    ax_profile.plot(x, endpoint_prior, label="prior endpoint", color="#ff7f0e", linewidth=1.2)
+    ax_profile.set_title("Endpoint attention row")
+    ax_profile.set_xlabel("Key position")
+    ax_profile.set_ylabel("Weight")
+    ax_profile.grid(True, alpha=0.25)
+    ax_profile.legend(loc="upper left")
+
+    ax_delta.bar(x, endpoint_diff, color="#8c564b", width=0.9)
+    ax_delta.set_title("Endpoint absolute difference")
+    ax_delta.set_xlabel("Key position")
+    ax_delta.set_ylabel("Abs diff")
+    ax_delta.grid(True, axis="y", alpha=0.25)
+
+    ax_text.axis("off")
+    top_lag = int(manifest_row.get("endpoint_top_lag", len(endpoint_series) - 1 - int(np.argmax(endpoint_series))))
+    top_weight = float(manifest_row.get("endpoint_top_weight", float(endpoint_series.max())))
+    endpoint_l1 = float(manifest_row.get("endpoint_l1_mean", float(endpoint_diff.sum())))
+    description = (
+        f"Ticker: {ticker}\n"
+        f"Window: {window_id}\n"
+        f"Dates: {manifest_row.get('start_date', '')} to {manifest_row.get('end_date', '')}\n"
+        f"Layer/head: {layer_idx}/{head_idx}\n"
+        f"Association mode: {association_mode}\n"
+        f"Score: {float(manifest_row.get('score', np.nan)):.6g}\n"
+        f"Association discrepancy: {float(manifest_row.get('association_discrepancy', np.nan)):.6g}\n"
+        f"Endpoint top lag: {top_lag}\n"
+        f"Endpoint top weight: {top_weight:.6g}\n"
+        f"Endpoint L1 gap: {endpoint_l1:.6g}\n\n"
+        "Interpretation:\n"
+        "Series is the transformer's learned attention.\n"
+        "Prior is the configured GBM timestamp posterior.\n"
+        "Large gaps mark departures from that prior."
+    )
+    ax_text.text(0.0, 1.0, description, va="top", ha="left", fontsize=10, family="monospace")
+
+    fig.suptitle(f"{ticker} attention diagnostic | window {window_id}")
+    fig.tight_layout(rect=[0, 0.03, 1, 0.95])
+    fig.savefig(outpath, dpi=150)
+    plt.close(fig)
+
+    return AttentionPlotSummary(
+        ticker=ticker,
+        window_id=window_id,
+        layer=layer_idx,
+        head=head_idx,
+        endpoint_top_lag=top_lag,
+        endpoint_top_weight=top_weight,
+        endpoint_l1_mean=endpoint_l1,
+        outpath=str(outpath),
+    )
 
 
 def robust_z(series: pd.Series) -> pd.Series:
@@ -305,7 +448,27 @@ def run_mad_visualize(args) -> pd.DataFrame:
     print(f"Done. Final plots in {outdir} summary: {summary_csv}")
     return summary_df
 
+
+def run_attention_visualize(args) -> pd.DataFrame:
+    manifest_path = Path(args.attention_manifest)
+    manifest = pd.read_csv(manifest_path)
+    if manifest.empty:
+        raise ValueError(f"Attention manifest is empty: {manifest_path}")
+    outdir = Path(args.out)
+    layer = getattr(args, "attention_layer", 0)
+    head = getattr(args, "attention_head", 0)
+    summaries = []
+    for _, row in manifest.iterrows():
+        summaries.append(plot_attention_window(row, outdir, layer=layer, head=head))
+    summary_df = pd.DataFrame([summary.__dict__ for summary in summaries])
+    summary_path = outdir / "attention_plot_summary.csv"
+    outdir.mkdir(parents=True, exist_ok=True)
+    summary_df.to_csv(summary_path, index=False)
+    print(f"Done. Attention plots in {outdir} summary: {summary_path}")
+    return summary_df
+
 __all__ = [
+    "AttentionPlotSummary",
     "SpikeSummary",
     "add_final_score_columns",
     "add_verticals",
@@ -317,6 +480,8 @@ __all__ = [
     "parse_csv_list",
     "price_anomaly_starts",
     "plot_mad_ticker",
+    "plot_attention_window",
     "robust_z",
+    "run_attention_visualize",
     "run_mad_visualize",
 ]

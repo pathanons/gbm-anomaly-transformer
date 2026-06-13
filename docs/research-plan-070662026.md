@@ -259,6 +259,14 @@ $$
 
 ## Implementation Log
 
+### 2026-06-13 - Best Suite Config Selection
+
+- Aggregated `D:/AnomalyTransformerRuns/experiments/best_nllassoc*` validation score exports into `results/best_config_seed_metrics.csv` and `results/best_config_summary.csv`.
+- Selected `h=2, e_layers=4, lr=5e-5, epochs=20` as the current validation-first best config among completed runs: mean validation ROC-AUC 0.536451 and PR-AUC 0.974975 across five seeds. The matching 40-epoch config produced identical metrics, likely due to early stopping/checkpoint reuse, so the 20-epoch setting is preferred for lower compute.
+- Treat test metrics as confirmation only, not model-selection evidence; validation performance differences remain small and should be reported with seed variation.
+- Added `configs/best.yaml` as the runnable single-config version of the selected seed-42 checkpoint family (`best_nllassoc_w100_h2_l4_lr0p00005_ep20_s42`) and dry-run validated it through `run.py`.
+- Added YAML-driven attention diagnostics through `configs/attention_best.yaml` and `pipeline: attention_visualize`. The path exports selected attention matrices to compressed `.npz` artifacts and renders learned-series, GBM prior, absolute-difference, and endpoint-profile plots. Generated top-5 association-discrepancy diagnostics for the selected best checkpoint under `D:/AnomalyTransformerRuns/experiments/best_nllassoc_w100_h2_l4_lr0p00005_ep20_s42/reports/attention`.
+
 ### 2026-06-10 - Phase Config Reorganization
 
 - Reorganized runnable YAMLs into `configs/phase1` through `configs/phase5` so data preparation, statistics, insights, model/loss/score ablations, visualization, and baseline experiments are phase-addressable through `python run.py --config ...`.

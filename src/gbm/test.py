@@ -3,7 +3,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
+import torch
 
 from src.gbm.datasets import get_run_dir, save_json, set_seed
 from src.gbm.score import add_test_event_columns, average_precision_score_local, collect_joint_scores, roc_auc_score_local
@@ -65,6 +67,195 @@ def summarize_events(frame: pd.DataFrame) -> pd.DataFrame:
             row.update({"non_event_score_mean": float("nan"), "non_event_score_p95": float("nan")})
         rows.append(row)
     return pd.DataFrame(rows)
+
+
+def _default_attention_score_csv(run_dir: Path, split: str) -> Path:
+    if split == "val":
+        return run_dir / "reports" / "validation_scores.csv"
+    if split == "test_preview":
+        return run_dir / "reports" / "test_scores_preview.csv"
+    return run_dir / "reports" / "test_scores.csv"
+
+
+def _parse_optional_ints(value) -> set[int]:
+    if value is None:
+        return set()
+    if isinstance(value, (list, tuple, set)):
+        return {int(item) for item in value}
+    return {int(item.strip()) for item in str(value).split(",") if item.strip()}
+
+
+def select_attention_windows(args, run_dir: Path) -> pd.DataFrame:
+    split = str(getattr(args, "attention_split", "test") or "test")
+    score_csv_value = getattr(args, "attention_score_csv", None)
+    score_csv = Path(score_csv_value) if score_csv_value else _default_attention_score_csv(run_dir, split)
+    if not score_csv.exists():
+        raise FileNotFoundError(f"Missing score CSV for attention selection: {score_csv}")
+
+    frame = pd.read_csv(score_csv)
+    if split and "split" in frame.columns:
+        frame = frame[frame["split"].astype(str) == split].copy()
+    if getattr(args, "tickers", None):
+        frame = frame[frame["ticker"].astype(str).isin([str(ticker) for ticker in args.tickers])].copy()
+
+    manual_window_ids = _parse_optional_ints(getattr(args, "attention_window_ids", None))
+    if manual_window_ids:
+        selected = frame[frame["window_id"].astype(int).isin(manual_window_ids)].copy()
+    else:
+        select_by = str(getattr(args, "attention_select_by", "association_discrepancy") or "association_discrepancy")
+        if select_by == "labeled":
+            if "y_true" not in frame.columns:
+                raise ValueError("attention_select_by=labeled requires y_true in the score CSV")
+            selected = frame[frame["y_true"].astype(int) > 0].copy()
+            sort_column = "score" if "score" in selected.columns else "association_discrepancy"
+        else:
+            sort_column = select_by
+            if sort_column not in frame.columns:
+                raise ValueError(f"attention_select_by column not found in score CSV: {sort_column}")
+            selected = frame.copy()
+        top_k = max(int(getattr(args, "attention_top_k", 5) or 5), 1)
+        selected = selected.sort_values(sort_column, ascending=False).head(top_k)
+
+    if selected.empty:
+        raise ValueError("No attention windows selected")
+    return selected.reset_index(drop=True)
+
+
+def _entropy(values: np.ndarray) -> float:
+    safe = np.clip(values.astype(float), 1e-12, None)
+    return float(-(safe * np.log(safe)).sum())
+
+
+def _attention_summary(series: np.ndarray, prior: np.ndarray) -> dict[str, float | int]:
+    endpoint_series = series[:, :, -1, :]
+    endpoint_prior = prior[:, :, -1, :]
+    endpoint_abs_diff = np.abs(endpoint_series - endpoint_prior)
+    averaged_endpoint = endpoint_series.mean(axis=(0, 1))
+    top_index = int(np.argmax(averaged_endpoint))
+    length = int(averaged_endpoint.shape[0])
+    return {
+        "endpoint_l1_mean": float(endpoint_abs_diff.sum(axis=-1).mean()),
+        "endpoint_series_entropy_mean": float(np.mean([_entropy(row) for row in endpoint_series.reshape(-1, length)])),
+        "endpoint_prior_entropy_mean": float(np.mean([_entropy(row) for row in endpoint_prior.reshape(-1, length)])),
+        "endpoint_top_index": top_index,
+        "endpoint_top_lag": int(length - 1 - top_index),
+        "endpoint_top_weight": float(averaged_endpoint[top_index]),
+    }
+
+
+def export_attention_artifacts(args) -> pd.DataFrame:
+    set_seed(args.seed)
+    device = resolve_device(args.device)
+    split = str(getattr(args, "attention_split", "test") or "test")
+    if split not in {"val", "test"}:
+        raise ValueError("attention_split must be val or test")
+    print(f"[attention] device={device} split={split}", flush=True)
+
+    run_dir = get_run_dir(args.exp_name, getattr(args, "output_root", None))
+    model_path = checkpoint_path(args, filename="gbm.pt")
+    if not model_path.exists():
+        raise FileNotFoundError(f"Missing checkpoint: {model_path}")
+
+    selected = select_attention_windows(args, run_dir)
+    target_ids = {int(value) for value in selected["window_id"].tolist()}
+    print(f"[attention] selected windows={len(target_ids)} from score CSV", flush=True)
+
+    manifest, window_store, scaler, train_ds, val_ds, test_ds, train_loader, val_loader, test_loader, input_dim = build_runtime_loaders(args)
+    loader = val_loader if split == "val" else test_loader
+    model = build_gbm_model(args, input_dim, device)
+    model.load_state_dict(load_state_dict(model_path, device))
+    model.eval()
+
+    out_root_value = getattr(args, "attention_out", None)
+    out_root = Path(out_root_value) if out_root_value else run_dir / "reports" / "attention"
+    data_dir = out_root / "data"
+    data_dir.mkdir(parents=True, exist_ok=True)
+
+    score_lookup = selected.set_index(selected["window_id"].astype(int)).to_dict(orient="index")
+    rows = []
+    with torch.no_grad():
+        for batch in loader:
+            meta = batch["meta"]
+            batch_window_ids = [int(value) for value in meta["window_id"]]
+            wanted_positions = [idx for idx, window_id in enumerate(batch_window_ids) if window_id in target_ids]
+            if not wanted_positions:
+                continue
+
+            x = batch["x"].to(device)
+            returns = batch["returns"].to(device)
+            time_deltas = batch["time_deltas"].to(device)
+            _, _, _, _, attn_maps, _, _, _, association = model(
+                x,
+                returns=returns,
+                time_deltas=time_deltas,
+                return_attention=True,
+            )
+            series_stack = torch.stack([attn["series"] for attn in attn_maps], dim=1).detach().cpu().numpy()
+            prior_stack = torch.stack([attn["prior"] for attn in attn_maps], dim=1).detach().cpu().numpy()
+            assoc_values = association.detach().cpu().numpy() if association is not None else np.zeros(len(batch_window_ids))
+
+            for idx in wanted_positions:
+                window_id = int(batch_window_ids[idx])
+                ticker = str(meta["ticker"][idx])
+                start_idx = int(meta["start_idx"][idx])
+                dates = window_store[ticker]["dates"][start_idx: start_idx + int(args.window_size)]
+                series = series_stack[idx].astype(np.float32)
+                prior = prior_stack[idx].astype(np.float32)
+                diff = (series - prior).astype(np.float32)
+                out_path = data_dir / f"{ticker}_window{window_id}.npz"
+                np.savez_compressed(
+                    out_path,
+                    series=series,
+                    prior=prior,
+                    diff=diff,
+                    dates=np.asarray(dates, dtype=str),
+                )
+                score_row = score_lookup.get(window_id, {})
+                row = {
+                    "ticker": ticker,
+                    "split": split,
+                    "window_id": window_id,
+                    "start_idx": start_idx,
+                    "end_idx": int(meta["end_idx"][idx]),
+                    "start_date": meta["start_date"][idx],
+                    "end_date": meta["end_date"][idx],
+                    "y_true": int(batch["y"][idx].item()),
+                    "association_discrepancy": float(assoc_values[idx]),
+                    "score": float(score_row.get("score", np.nan)),
+                    "nll": float(score_row.get("nll", np.nan)),
+                    "association_mode": args.association_mode,
+                    "predictive_distribution": args.predictive_distribution,
+                    "attention_npz": str(out_path),
+                }
+                row.update(_attention_summary(series, prior))
+                rows.append(row)
+                target_ids.remove(window_id)
+
+            if not target_ids:
+                break
+
+    if target_ids:
+        print(f"[attention] warning: {len(target_ids)} selected windows were not found in {split} loader", flush=True)
+    manifest_df = pd.DataFrame(rows)
+    manifest_path = out_root / "attention_manifest.csv"
+    manifest_df.to_csv(manifest_path, index=False)
+    print(f"[attention] saved manifest={manifest_path}", flush=True)
+
+    if getattr(args, "attention_make_plots", True):
+        from src.gbm.visualize import run_attention_visualize
+
+        plot_args = type(
+            "AttentionPlotArgs",
+            (),
+            {
+                "attention_manifest": str(manifest_path),
+                "out": str(out_root / "figures"),
+                "attention_layer": getattr(args, "attention_layer", 0),
+                "attention_head": getattr(args, "attention_head", 0),
+            },
+        )()
+        run_attention_visualize(plot_args)
+    return manifest_df
 
 
 def validate_model(args) -> dict[str, object]:
@@ -191,9 +382,11 @@ __all__ = [
     "build_runtime_loaders",
     "checkpoint_path",
     "collect_joint_scores",
+    "export_attention_artifacts",
     "load_state_dict",
     "score_kwargs",
     "score_summary",
+    "select_attention_windows",
     "summarize_events",
     "test_model",
     "validate_model",

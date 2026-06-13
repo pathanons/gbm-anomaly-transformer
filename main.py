@@ -21,6 +21,7 @@ PIPELINES = {
     "train",
     "validate",
     "visualize",
+    "attention_visualize",
     "experiment_suite",
 }
 
@@ -63,6 +64,14 @@ GBM_DEFAULTS = {
     "show_true_labels": False,
     "full_context": False,
     "fast_export": False,
+    "attention_split": "test",
+    "attention_top_k": 5,
+    "attention_select_by": "association_discrepancy",
+    "attention_score_csv": None,
+    "attention_out": None,
+    "attention_layer": 0,
+    "attention_head": 0,
+    "attention_make_plots": True,
 }
 
 STAGE_DEFAULTS = {
@@ -180,6 +189,7 @@ def normalize_common(values: dict[str, object]) -> dict[str, object]:
     values["show_true_labels"] = as_bool(values.get("show_true_labels"))
     values["full_context"] = as_bool(values.get("full_context"))
     values["fast_export"] = as_bool(values.get("fast_export"))
+    values["attention_make_plots"] = as_bool(values.get("attention_make_plots"), default=True)
     return values
 
 
@@ -425,6 +435,22 @@ def run_config(config_path: Path, dry_run: bool) -> None:
         from src.gbm.visualize import run_mad_visualize
 
         run_mad_visualize(args)
+        return
+
+    if pipeline == "attention_visualize":
+        for window_size in window_sizes:
+            default_name = f"{base_exp_name}_w{window_size}" if len(window_sizes) > 1 else base_exp_name
+            exp_name = resolve_template(config.get("exp_name"), window_size, default_name)
+            args = namespace_for_gbm(config, window_size, exp_name)
+            print(
+                f"[main] internal pipeline: attention visualize exp={args.exp_name} "
+                f"split={args.attention_split} top_k={args.attention_top_k}"
+            )
+            if dry_run:
+                continue
+            from src.gbm.test import export_attention_artifacts
+
+            export_attention_artifacts(args)
         return
 
     if pipeline == "experiment_suite":
