@@ -259,6 +259,12 @@ $$
 
 ## Implementation Log
 
+### 2026-06-22 - Phase 5 Findings Consolidation
+
+- Added `docs/phase5-findings-summary-20260622.md` as the report-facing Phase 5 finding index. Carry forward Student-t next-day NLL as the useful detector signal for endpoint log-return +/-3 std weak labels: Q98 gives 86.02% recall, Q98.5 gives 64.78% precision and 77.62% recall, and Q99 gives 78.76% precision and 65.52% recall under validation-quantile thresholding.
+- Recorded the negative attention result: current attention motifs did not show a meaningful repeated return-shock pattern. Rank-1 endpoint attention never matched the max absolute-return day in the selected windows, and any top-5 attention key overlapped a top-5 absolute-return day only 15.48% of the time. Keep attention images/video/NPZ exports for future interpretability work, but do not claim attention is a detector or causal explanation from this run.
+- Cleaned the Phase 5 README so the active reusable configs are explicit and old baseline limitations remain clear.
+
 ### 2026-06-17 - Fast Next-Day Student-t NLL Baseline
 
 - Added `target: next_day_log_return` support while preserving the old window-return default. Runtime datasets now emit `target_return` only for next-day configs, and train/test NLL uses that scalar target for `p(r_{t+1}|X_t)`. Added causal volatility-aware `log_return_tail_vol` features including shifted rolling volatility and `return_z_20`; scaler fitting remains train-split only through the existing loader path.
