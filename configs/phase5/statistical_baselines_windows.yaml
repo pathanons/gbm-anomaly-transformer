@@ -1,0 +1,10 @@
+exp_name: sp500_event_taxonomy_w{window_size}_statistical_baselines
+pipeline: statistical_baseline
+data_path: datasets/SP500_event_taxonomy_w{window_size}
+tickers: all
+features: all
+window_size: 20,30,40,60
+step: 1
+seed: 42
+threshold_quantile: 0.95
+baselines: all

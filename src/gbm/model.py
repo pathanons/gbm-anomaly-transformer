@@ -1,22 +1,361 @@
 from __future__ import annotations
 
-from typing import List, Optional, Tuple
+import math
+from typing import Dict, List, Optional, Tuple
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from src.gbm.embed import DataEmbedding
+class PositionalEmbedding(nn.Module):
+    def __init__(self, d_model, max_len=5000):
+        super(PositionalEmbedding, self).__init__()
+        # Compute the positional encodings once in log space.
+        pe = torch.zeros(max_len, d_model).float()
+        pe.require_grad = False
+
+        position = torch.arange(0, max_len).float().unsqueeze(1)
+        div_term = (torch.arange(0, d_model, 2).float() * -(math.log(10000.0) / d_model)).exp()
+
+        pe[:, 0::2] = torch.sin(position * div_term)
+        pe[:, 1::2] = torch.cos(position * div_term)
+
+        pe = pe.unsqueeze(0)
+        self.register_buffer('pe', pe)
+
+    def forward(self, x):
+        return self.pe[:, :x.size(1)]
+
+
+class TokenEmbedding(nn.Module):
+    def __init__(self, c_in, d_model):
+        super(TokenEmbedding, self).__init__()
+        padding = 1 if torch.__version__ >= '1.5.0' else 2
+        self.tokenConv = nn.Conv1d(in_channels=c_in, out_channels=d_model,
+                                   kernel_size=3, padding=padding, padding_mode='circular', bias=False)
+        for m in self.modules():
+            if isinstance(m, nn.Conv1d):
+                nn.init.kaiming_normal_(m.weight, mode='fan_in', nonlinearity='leaky_relu')
+
+    def forward(self, x):
+        x = self.tokenConv(x.permute(0, 2, 1)).transpose(1, 2)
+        return x
+
+
+class DataEmbedding(nn.Module):
+    def __init__(self, c_in, d_model, dropout=0.0):
+        super(DataEmbedding, self).__init__()
+
+        self.value_embedding = TokenEmbedding(c_in=c_in, d_model=d_model)
+        self.position_embedding = PositionalEmbedding(d_model=d_model)
+
+        self.dropout = nn.Dropout(p=dropout)
+
+    def forward(self, x):
+        x = self.value_embedding(x) + self.position_embedding(x)
+        return self.dropout(x)
 
 
 def causal_mask(length: int, device: torch.device) -> torch.Tensor:
     return torch.triu(torch.ones(length, length, device=device, dtype=torch.bool), diagonal=1)
 
 
-class GBMEncoderLayer(nn.Module):
-    def __init__(self, d_model: int, n_heads: int, d_ff: int, dropout: float):
+def symmetric_kl(series: torch.Tensor, prior: torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
+    series = torch.clamp(series, min=eps)
+    prior = torch.clamp(prior, min=eps)
+    series_to_prior = torch.sum(series * (torch.log(series) - torch.log(prior)), dim=-1)
+    prior_to_series = torch.sum(prior * (torch.log(prior) - torch.log(series)), dim=-1)
+    return 0.5 * (series_to_prior + prior_to_series)
+
+
+def temporal_prior(batch_size: int, n_heads: int, length: int, device: torch.device) -> torch.Tensor:
+    positions = torch.arange(length, device=device)
+    distances = torch.abs(positions[None, :] - positions[:, None]).float()
+    logits = -distances
+    mask = causal_mask(length, device)
+    logits = logits.masked_fill(mask, -1e9)
+    prior = torch.softmax(logits, dim=-1)
+    return prior.unsqueeze(0).unsqueeze(0).expand(batch_size, n_heads, length, length)
+
+
+def gaussian_log_return_attention_prior(
+    returns: torch.Tensor,
+    log_drift: torch.Tensor,
+    sigma: torch.Tensor,
+    n_heads: int,
+    time_deltas: Optional[torch.Tensor] = None,
+    eps: float = 1e-6,
+) -> torch.Tensor:
+    """Latent timestamp posterior from Gaussian log-price transitions.
+
+    The drift parameter is a log-return drift alpha_t, so the transition mean
+    over j -> i is sum alpha_u * dt_u across the interval.
+    """
+    return gaussian_transition_timestamp_posterior(
+        returns,
+        log_drift,
+        sigma,
+        n_heads,
+        time_deltas=time_deltas,
+        eps=eps,
+    )
+
+
+def canonical_gbm_attention_prior(
+    returns: torch.Tensor,
+    price_drift: torch.Tensor,
+    sigma: torch.Tensor,
+    n_heads: int,
+    time_deltas: Optional[torch.Tensor] = None,
+    eps: float = 1e-6,
+) -> torch.Tensor:
+    """Latent timestamp posterior from the canonical GBM price process.
+
+    For dS_t = mu_t S_t dt + sigma_t S_t dW_t, the log-price transition drift
+    is mu_t - 0.5 sigma_t^2. This function applies that Ito correction before
+    accumulating the interval transition density.
+
+    The returned matrix is p(J_i = j | Delta L_{j->i}, theta), where J_i is an
+    explicit latent source timestamp with a uniform prior over j < i. The
+    diagonal i == j is excluded from the continuous GBM density; only the first
+    row falls back to self mass because there is no past timestamp.
+    """
+    sigma = torch.clamp(sigma, min=eps)
+    log_drift = price_drift - 0.5 * sigma**2
+    return gaussian_transition_timestamp_posterior(
+        returns,
+        log_drift,
+        sigma,
+        n_heads,
+        time_deltas=time_deltas,
+        eps=eps,
+    )
+
+
+def gbm_log_return_likelihood_prior(
+    returns: torch.Tensor,
+    log_drift: torch.Tensor,
+    sigma: torch.Tensor,
+    n_heads: int,
+    time_deltas: Optional[torch.Tensor] = None,
+    eps: float = 1e-6,
+) -> torch.Tensor:
+    """Causal GBM likelihood prior over source timestamps.
+
+    For query timestamp i and candidate source j < i, the cumulative log-return
+    follows Normal(drift_i * elapsed_ij, sigma_i^2 * elapsed_ij). The first row
+    falls back to self mass because no earlier source timestamp exists.
+    """
+    batch_size, length = returns.shape
+    device = returns.device
+    dtype = returns.dtype
+    if time_deltas is None:
+        time_deltas = torch.ones_like(returns)
+    else:
+        time_deltas = torch.clamp(time_deltas.to(device=device, dtype=dtype), min=eps)
+
+    log_level = torch.cumsum(returns, dim=1)
+    increments = log_level[:, :, None] - log_level[:, None, :]
+    elapsed_prefix = F.pad(torch.cumsum(time_deltas, dim=1), (1, 0))
+    elapsed = elapsed_prefix[:, 1:, None] - elapsed_prefix[:, None, 1:]
+    elapsed = torch.clamp(elapsed, min=eps)
+
+    positions = torch.arange(length, device=device)
+    past = positions[:, None] > positions[None, :]
+    sigma = torch.clamp(sigma, min=eps)
+    mean = log_drift[:, :, :, None] * elapsed[:, None, :, :]
+    variance = sigma[:, :, :, None].square() * elapsed[:, None, :, :]
+    std = torch.sqrt(torch.clamp(variance, min=eps))
+    z = (increments[:, None, :, :] - mean) / std
+    log_prob = -0.5 * z.square() - torch.log(std) - 0.5 * math.log(2 * math.pi)
+
+    candidate_prior = torch.full((length, length), -1e9, device=device, dtype=dtype)
+    past_counts = torch.arange(length, device=device, dtype=dtype).clamp(min=1.0)
+    candidate_prior = candidate_prior.masked_fill(past, 0.0)
+    candidate_prior = candidate_prior - torch.log(past_counts[:, None])
+    posterior_logits = log_prob + candidate_prior[None, None, :, :]
+    posterior = torch.softmax(posterior_logits, dim=-1)
+
+    first_row = torch.zeros(length, device=device, dtype=dtype)
+    first_row[0] = 1.0
+    row0_mask = (positions == 0)[None, None, :, None]
+    return torch.where(row0_mask, first_row[None, None, None, :], posterior)
+
+
+def gaussian_transition_timestamp_posterior(
+    returns: torch.Tensor,
+    interval_log_drift: torch.Tensor,
+    sigma: torch.Tensor,
+    n_heads: int,
+    time_deltas: Optional[torch.Tensor] = None,
+    eps: float = 1e-6,
+) -> torch.Tensor:
+    batch_size, length = returns.shape
+    device = returns.device
+    if time_deltas is None:
+        time_deltas = torch.ones_like(returns)
+    else:
+        time_deltas = torch.clamp(time_deltas.to(device=device, dtype=returns.dtype), min=eps)
+
+    log_level = torch.cumsum(returns, dim=1)
+    increments = log_level[:, :, None] - log_level[:, None, :]
+
+    positions = torch.arange(length, device=device)
+    raw_dt = positions[:, None] - positions[None, :]
+    past = raw_dt > 0
+
+    sigma = torch.clamp(sigma, min=eps)
+    dt = time_deltas[:, None, :]
+    drift_prefix = F.pad(torch.cumsum(interval_log_drift * dt, dim=2), (1, 0))
+    variance_prefix = F.pad(torch.cumsum(sigma**2 * dt, dim=2), (1, 0))
+    mean = drift_prefix[:, :, 1:, None] - drift_prefix[:, :, None, 1:]
+    variance = variance_prefix[:, :, 1:, None] - variance_prefix[:, :, None, 1:]
+    variance = torch.clamp(variance, min=eps)
+    std = torch.sqrt(variance)
+
+    z = (increments[:, None, :, :] - mean) / std
+    log_prob = -0.5 * (z**2) - torch.log(std) - 0.5 * math.log(2 * math.pi)
+    candidate_prior = torch.full((length, length), -1e9, device=device, dtype=returns.dtype)
+    past_counts = torch.arange(length, device=device, dtype=returns.dtype).clamp(min=1.0)
+    candidate_prior = candidate_prior.masked_fill(past, 0.0)
+    candidate_prior = candidate_prior - torch.log(past_counts[:, None])
+    posterior_logits = log_prob + candidate_prior[None, None, :, :]
+    posterior = torch.softmax(posterior_logits, dim=-1)
+    first_row = torch.zeros(length, device=device, dtype=returns.dtype)
+    first_row[0] = 1.0
+    row0_mask = (positions == 0)[None, None, :, None]
+    return torch.where(row0_mask, first_row[None, None, None, :], posterior)
+
+
+gaussian_transition_attention_prior = gaussian_transition_timestamp_posterior
+
+
+def student_t_transition_timestamp_posterior(
+    returns: torch.Tensor,
+    interval_log_drift: torch.Tensor,
+    sigma: torch.Tensor,
+    n_heads: int,
+    time_deltas: Optional[torch.Tensor] = None,
+    df: float = 5.0,
+    eps: float = 1e-6,
+) -> torch.Tensor:
+    """Latent timestamp posterior with heavy-tailed Student-t transitions."""
+    batch_size, length = returns.shape
+    device = returns.device
+    dtype = returns.dtype
+    if time_deltas is None:
+        time_deltas = torch.ones_like(returns)
+    else:
+        time_deltas = torch.clamp(time_deltas.to(device=device, dtype=dtype), min=eps)
+
+    log_level = torch.cumsum(returns, dim=1)
+    increments = log_level[:, :, None] - log_level[:, None, :]
+    dt = time_deltas[:, None, :]
+    drift_prefix = F.pad(torch.cumsum(interval_log_drift * dt, dim=2), (1, 0))
+    variance_prefix = F.pad(torch.cumsum(torch.clamp(sigma, min=eps).square() * dt, dim=2), (1, 0))
+    mean = drift_prefix[:, :, 1:, None] - drift_prefix[:, :, None, 1:]
+    scale = torch.sqrt(torch.clamp(variance_prefix[:, :, 1:, None] - variance_prefix[:, :, None, 1:], min=eps))
+
+    nu = torch.as_tensor(max(float(df), 2.1), device=device, dtype=dtype)
+    z = (increments[:, None, :, :] - mean) / scale
+    log_prob = (
+        torch.lgamma((nu + 1.0) / 2.0)
+        - torch.lgamma(nu / 2.0)
+        - 0.5 * (torch.log(nu) + math.log(math.pi))
+        - torch.log(scale)
+        - 0.5 * (nu + 1.0) * torch.log1p(z.square() / nu)
+    )
+
+    positions = torch.arange(length, device=device)
+    past = positions[:, None] > positions[None, :]
+    candidate_prior = torch.full((length, length), -1e9, device=device, dtype=dtype)
+    past_counts = torch.arange(length, device=device, dtype=dtype).clamp(min=1.0)
+    candidate_prior = candidate_prior.masked_fill(past, 0.0) - torch.log(past_counts[:, None])
+    posterior = torch.softmax(log_prob + candidate_prior[None, None, :, :], dim=-1)
+    first_row = torch.zeros(length, device=device, dtype=dtype)
+    first_row[0] = 1.0
+    row0_mask = (positions == 0)[None, None, :, None]
+    return torch.where(row0_mask, first_row[None, None, None, :], posterior)
+
+
+def mle_gbm_attention_prior(
+    returns: torch.Tensor,
+    n_heads: int,
+    time_deltas: Optional[torch.Tensor] = None,
+    eps: float = 1e-6,
+) -> torch.Tensor:
+    """Latent timestamp posterior using per-window GBM MLE volatility.
+
+    The volatility estimator follows the irregular-time MLE form:
+        sigma^2 = mean(r_i^2 / dt_i) - mean(1) * R^2 / T
+    where R is the total log return and T is total elapsed time in the window.
+    """
+    batch_size, length = returns.shape
+    device = returns.device
+    dtype = returns.dtype
+    if time_deltas is None:
+        time_deltas = torch.ones_like(returns)
+    else:
+        time_deltas = torch.clamp(time_deltas.to(device=device, dtype=dtype), min=eps)
+
+    total_time = torch.clamp(time_deltas.sum(dim=1), min=eps)
+    total_return = returns.sum(dim=1)
+    n = torch.full_like(total_time, float(length))
+    sigma2 = (returns.square() / time_deltas).sum(dim=1) / n - total_return.square() / (n * total_time)
+    sigma2 = torch.clamp(sigma2, min=eps)
+    log_drift = total_return / total_time
+
+    log_level = torch.cumsum(returns, dim=1)
+    increments = log_level[:, :, None] - log_level[:, None, :]
+    elapsed_prefix = F.pad(torch.cumsum(time_deltas, dim=1), (1, 0))
+    elapsed = elapsed_prefix[:, 1:, None] - elapsed_prefix[:, None, 1:]
+
+    positions = torch.arange(length, device=device)
+    past = positions[:, None] > positions[None, :]
+    elapsed = torch.clamp(elapsed, min=eps)
+    mean = log_drift[:, None, None] * elapsed
+    variance = sigma2[:, None, None] * elapsed
+    std = torch.sqrt(torch.clamp(variance, min=eps))
+    z = (increments - mean) / std
+    log_prob = -0.5 * (z**2) - torch.log(std) - 0.5 * math.log(2 * math.pi)
+
+    candidate_prior = torch.full((length, length), -1e9, device=device, dtype=dtype)
+    past_counts = torch.arange(length, device=device, dtype=dtype).clamp(min=1.0)
+    candidate_prior = candidate_prior.masked_fill(past, 0.0)
+    candidate_prior = candidate_prior - torch.log(past_counts[:, None])
+    posterior_logits = log_prob + candidate_prior[None, :, :]
+    posterior = torch.softmax(posterior_logits, dim=-1)
+    first_row = torch.zeros(length, device=device, dtype=dtype)
+    first_row[0] = 1.0
+    row0_mask = (positions == 0)[None, :, None]
+    posterior = torch.where(row0_mask, first_row[None, None, :], posterior)
+    return posterior[:, None, :, :].expand(batch_size, n_heads, length, length)
+
+
+class TransitionPriorEncoderLayer(nn.Module):
+    def __init__(
+        self,
+        d_model: int,
+        n_heads: int,
+        d_ff: int,
+        dropout: float,
+        association_mode: str = "gaussian_log_return",
+    ):
         super().__init__()
-        self.attn = nn.MultiheadAttention(d_model, n_heads, dropout=dropout, batch_first=True)
+        if d_model % n_heads != 0:
+            raise ValueError("d_model must be divisible by n_heads")
+        if association_mode not in {"gaussian_log_return", "canonical_gbm", "gbm_log_return_likelihood", "student_t_log_return", "mle_gbm", "mle_learned_gbm", "temporal", "none"}:
+            raise ValueError("association_mode must be gaussian_log_return, canonical_gbm, gbm_log_return_likelihood, student_t_log_return, mle_gbm, mle_learned_gbm, temporal, or none")
+        self.n_heads = n_heads
+        self.head_dim = d_model // n_heads
+        self.association_mode = association_mode
+        self.q_proj = nn.Linear(d_model, d_model)
+        self.k_proj = nn.Linear(d_model, d_model)
+        self.v_proj = nn.Linear(d_model, d_model)
+        self.out_proj = nn.Linear(d_model, d_model)
+        self.mu_prior = nn.Linear(d_model, n_heads)
+        self.sigma_prior = nn.Linear(d_model, n_heads)
+        self.attn_dropout = nn.Dropout(dropout)
         self.dropout = nn.Dropout(dropout)
         self.norm1 = nn.LayerNorm(d_model)
         self.norm2 = nn.LayerNorm(d_model)
@@ -27,19 +366,83 @@ class GBMEncoderLayer(nn.Module):
             nn.Linear(d_ff, d_model),
         )
 
-    def forward(self, x: torch.Tensor, attn_mask: Optional[torch.Tensor] = None) -> Tuple[torch.Tensor, torch.Tensor]:
-        attn_out, attn_weights = self.attn(
-            x,
-            x,
-            x,
-            attn_mask=attn_mask,
-            need_weights=True,
-            average_attn_weights=False,
-        )
+    def forward(
+        self,
+        x: torch.Tensor,
+        returns: Optional[torch.Tensor] = None,
+        time_deltas: Optional[torch.Tensor] = None,
+        attn_mask: Optional[torch.Tensor] = None,
+    ) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
+        batch_size, length, d_model = x.shape
+        q = self.q_proj(x).view(batch_size, length, self.n_heads, self.head_dim).transpose(1, 2)
+        k = self.k_proj(x).view(batch_size, length, self.n_heads, self.head_dim).transpose(1, 2)
+        v = self.v_proj(x).view(batch_size, length, self.n_heads, self.head_dim).transpose(1, 2)
+
+        scores = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(self.head_dim)
+        if attn_mask is not None:
+            scores = scores.masked_fill(attn_mask[None, None, :, :], -1e9)
+        series = torch.softmax(scores, dim=-1)
+        attn_values = torch.matmul(self.attn_dropout(series), v)
+        attn_out = self.out_proj(attn_values.transpose(1, 2).contiguous().view(batch_size, length, d_model))
+
+        prior_drift = self.mu_prior(x).transpose(1, 2)
+        prior_sigma = F.softplus(self.sigma_prior(x)).transpose(1, 2) + 1e-4
+        if self.association_mode == "none":
+            prior = series.detach()
+            discrepancy = torch.zeros(batch_size, device=x.device)
+        elif self.association_mode == "temporal" or returns is None:
+            prior = temporal_prior(batch_size, self.n_heads, length, x.device)
+            discrepancy = symmetric_kl(series, prior).mean(dim=(1, 2))
+        elif self.association_mode == "mle_gbm":
+            prior = mle_gbm_attention_prior(
+                returns,
+                self.n_heads,
+                time_deltas=time_deltas,
+            )
+            discrepancy = symmetric_kl(series, prior).mean(dim=(1, 2))
+        elif self.association_mode == "gbm_log_return_likelihood":
+            prior = gbm_log_return_likelihood_prior(
+                returns,
+                prior_drift,
+                prior_sigma,
+                self.n_heads,
+                time_deltas=time_deltas,
+            )
+            discrepancy = symmetric_kl(series, prior).mean(dim=(1, 2))
+        elif self.association_mode == "student_t_log_return":
+            prior = student_t_transition_timestamp_posterior(
+                returns,
+                prior_drift,
+                prior_sigma,
+                self.n_heads,
+                time_deltas=time_deltas,
+            )
+            discrepancy = symmetric_kl(series, prior).mean(dim=(1, 2))
+        else:
+            prior_fn = (
+                canonical_gbm_attention_prior
+                if self.association_mode == "canonical_gbm"
+                else gaussian_log_return_attention_prior
+            )
+            prior = prior_fn(
+                returns,
+                prior_drift,
+                prior_sigma,
+                self.n_heads,
+                time_deltas=time_deltas,
+            )
+            discrepancy = symmetric_kl(series, prior).mean(dim=(1, 2))
+
         x = self.norm1(x + self.dropout(attn_out))
         ff_out = self.ff(x)
         x = self.norm2(x + self.dropout(ff_out))
-        return x, attn_weights
+        return x, {
+            "series": series,
+            "prior": prior,
+            "discrepancy": discrepancy,
+            "prior_drift": prior_drift,
+            "prior_sigma": prior_sigma,
+        }
 
 
 class AnomalyTransformer(nn.Module):
@@ -53,14 +456,31 @@ class AnomalyTransformer(nn.Module):
         e_layers: int = 3,
         d_ff: int = 256,
         dropout: float = 0.1,
+        predictive_distribution: str = "gaussian",
+        association_mode: str = "gaussian_log_return",
     ):
         super().__init__()
+        if predictive_distribution not in {"gaussian", "student_t"}:
+            raise ValueError("predictive_distribution must be gaussian or student_t")
+        if association_mode not in {"gaussian_log_return", "canonical_gbm", "gbm_log_return_likelihood", "student_t_log_return", "mle_gbm", "mle_learned_gbm", "temporal", "none"}:
+            raise ValueError("association_mode must be gaussian_log_return, canonical_gbm, gbm_log_return_likelihood, student_t_log_return, mle_gbm, mle_learned_gbm, temporal, or none")
         self.win_size = win_size
         self.enc_in = enc_in
         self.c_out = c_out
+        self.predictive_distribution = predictive_distribution
+        self.association_mode = association_mode
         self.embedding = DataEmbedding(enc_in, d_model, dropout)
         self.layers = nn.ModuleList(
-            [GBMEncoderLayer(d_model=d_model, n_heads=n_heads, d_ff=d_ff, dropout=dropout) for _ in range(e_layers)]
+            [
+                TransitionPriorEncoderLayer(
+                    d_model=d_model,
+                    n_heads=n_heads,
+                    d_ff=d_ff,
+                    dropout=dropout,
+                    association_mode=association_mode,
+                )
+                for _ in range(e_layers)
+            ]
         )
         summary_dim = d_model * 2
         self.recon_head = nn.Sequential(
@@ -78,20 +498,34 @@ class AnomalyTransformer(nn.Module):
             nn.GELU(),
             nn.Linear(d_model, 1),
         )
+        self.nu_head = nn.Sequential(
+            nn.Linear(summary_dim, d_model),
+            nn.GELU(),
+            nn.Linear(d_model, 1),
+        )
 
-    def forward(self, x: torch.Tensor, returns: Optional[torch.Tensor] = None, return_attention: bool = False):
+    def forward(
+        self,
+        x: torch.Tensor,
+        returns: Optional[torch.Tensor] = None,
+        time_deltas: Optional[torch.Tensor] = None,
+        return_attention: bool = False,
+    ):
         hidden = self.embedding(x)
         attn_mask = causal_mask(hidden.shape[1], hidden.device)
-        attn_maps: List[torch.Tensor] = []
+        attn_maps: List[Dict[str, torch.Tensor]] = []
 
         for layer in self.layers:
-            hidden, attn = layer(hidden, attn_mask=attn_mask)
+            hidden, attn = layer(hidden, returns=returns, time_deltas=time_deltas, attn_mask=attn_mask)
             attn_maps.append(attn)
 
         recon = self.recon_head(hidden)
         pooled = torch.cat([hidden.mean(dim=1), hidden[:, -1, :]], dim=-1)
         mu = self.mu_head(pooled).squeeze(-1)
         sigma = F.softplus(self.sigma_head(pooled)).squeeze(-1) + 1e-4
+        nu = None
+        if self.predictive_distribution == "student_t":
+            nu = F.softplus(self.nu_head(pooled)).squeeze(-1) + 2.1
 
         obs_mu = None
         obs_sigma = None
@@ -99,9 +533,24 @@ class AnomalyTransformer(nn.Module):
             obs_mu = returns.mean(dim=1)
             obs_sigma = returns.std(dim=1, unbiased=False) + 1e-4
 
+        association_discrepancy = None
+        if attn_maps:
+            association_discrepancy = torch.stack([attn["discrepancy"] for attn in attn_maps], dim=0).mean(dim=0)
+
         if return_attention:
-            return recon, mu, sigma, attn_maps, obs_mu, obs_sigma, hidden
-        return recon, mu, sigma, obs_mu, obs_sigma
+            return recon, mu, sigma, nu, attn_maps, obs_mu, obs_sigma, hidden, association_discrepancy
+        return recon, mu, sigma, nu, obs_mu, obs_sigma, association_discrepancy
 
 
-GBMAnomalyTransformer = AnomalyTransformer
+class GaussianLogReturnAttentionTransformer(AnomalyTransformer):
+    def __init__(self, *args, association_mode: str = "gaussian_log_return", **kwargs):
+        if association_mode != "gaussian_log_return":
+            raise ValueError("GaussianLogReturnAttentionTransformer requires association_mode='gaussian_log_return'")
+        super().__init__(*args, association_mode="gaussian_log_return", **kwargs)
+
+
+class CanonicalGBMAttentionTransformer(AnomalyTransformer):
+    def __init__(self, *args, association_mode: str = "canonical_gbm", **kwargs):
+        if association_mode != "canonical_gbm":
+            raise ValueError("CanonicalGBMAttentionTransformer requires association_mode='canonical_gbm'")
+        super().__init__(*args, association_mode="canonical_gbm", **kwargs)

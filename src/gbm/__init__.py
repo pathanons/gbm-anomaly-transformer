@@ -1,2 +1,2 @@
-"""GBM-aware anomaly detection components."""
+"""Financial prior attention anomaly-detection components."""
 

@@ -1,0 +1,1434 @@
+# Agent Prompt: แนวทางปรับ Anomaly Detection สำหรับ Stock Log Return ด้วย Student-t NLL
+
+## เป้าหมายหลักของงาน
+
+เรากำลังทำ anomaly detection สำหรับราคาหุ้น โดยโฟกัสที่การจับวันที่ `log return` สูงหรือต่ำผิดปกติ เมื่อเทียบกับบริบทของ volatility ในอดีต
+
+งานนี้เป็น:
+
+> self-supervised / unsupervised anomaly detection
+
+ไม่ใช่ supervised classification เพราะระหว่าง train จะไม่ใช้ label anomaly โดยตรง
+
+แนวคิดหลักคือ:
+
+> ให้โมเดลเรียนว่า return วันนี้ “น่าจะเกิดขึ้นมากหรือน้อยแค่ไหน” จากข้อมูลย้อนหลัง 60 วัน
+
+แล้วใช้ค่าความไม่น่าจะเกิดขึ้น หรือ Negative Log-Likelihood เป็น anomaly score
+
+---
+
+# 1. สิ่งที่ห้ามหลุดประเด็น
+
+Agent ต้องไม่เปลี่ยนโจทย์ไปเป็น supervised classification เว้นแต่จะระบุชัดว่าเป็น baseline หรือ optional experiment
+
+ห้าม train model ด้วย label anomaly เช่น:
+
+[
+y_t \in {0,1}
+]
+
+ห้ามใช้ binary cross entropy เป็น loss หลักของงานนี้
+
+ห้ามใช้ accuracy เป็น metric หลัก เพราะ anomaly มีจำนวนน้อยมาก และ accuracy อาจหลอกได้
+
+ห้ามสรุปว่า Anomaly Transformer หรือ association prior ดีที่สุดทันที ต้องทำ ablation เปรียบเทียบก่อน
+
+ห้ามใช้ `log_return_only` เป็น feature หลักโดยไม่เพิ่ม volatility context
+
+ห้ามใช้ reconstruction error เป็น score หลักโดยไม่เปรียบเทียบกับ NLL
+
+ห้ามใช้ข้อมูลอนาคตในการสร้าง rolling feature, scaler, threshold หรือ evaluation
+
+---
+
+# 2. สถานะเดิมของโมเดล
+
+โมเดลเดิมใช้ config:
+
+```yaml
+configs/phase3/gbm_logreturn_prior_w60_logreturn_minimax.yaml
+```
+
+โหมด prior เดิม:
+
+```yaml
+association_mode: gbm_log_return_likelihood
+features: log_return_only
+window_size: 60
+n_heads: 4
+e_layers: 3
+d_model: 128
+loss_combine_mode: nll_assoc_minimax
+association_weight: 3.0
+score_mode: softmax_product
+```
+
+prior เดิมคือ lower triangular GBM likelihood attention prior แบบ query-time parameter
+
+สำหรับ query time (i) และ source candidate (j<i):
+
+[
+R_{j \to i}
+===========
+
+\sum_{u=j+1}^{i} r_u
+]
+
+[
+\Delta t_{j \to i}
+==================
+
+\sum_{u=j+1}^{i} \Delta t_u
+]
+
+ใช้ drift และ volatility ของเวลา (i) โดยตรง:
+
+[
+M_{i,j}^{h}
+===========
+
+\alpha_i^h \Delta t_{j \to i}
+]
+
+[
+V_{i,j}^{h}
+===========
+
+(\sigma_i^h)^2 \Delta t_{j \to i}
+]
+
+แล้วสมมติว่า:
+
+[
+R_{j \to i}
+\sim
+Normal(M_{i,j}^{h}, V_{i,j}^{h})
+]
+
+จากนั้นคำนวณ prior attention:
+
+[
+z_{i,j}^{h}
+===========
+
+\log p(R_{j \to i}|\alpha_i^h,\sigma_i^h)
++
+\log \frac{1}{i}
+]
+
+[
+P_{i,j}^{h}
+===========
+
+softmax_{j<i}(z_{i,j}^{h})
+]
+
+แล้วเทียบกับ learned attention:
+
+[
+A_{i,j}^{l,h}
+]
+
+ด้วย symmetric KL:
+
+[
+L_{assoc}
+=========
+
+mean_{l,h,i}
+SKL(A_{i,:}^{l,h} || P_{i,:}^{h})
+]
+
+ปัญหาที่พบคือโมเดลจับ anomaly ได้ไม่ดี
+
+---
+
+# 3. สมมติฐานหลักที่ต้องทดสอบ
+
+สมมติฐานคือ ปัญหาอาจไม่ได้อยู่ที่ Transformer โดยตรง แต่อยู่ที่:
+
+1. ใช้ `log_return_only` ทำให้โมเดลไม่มี volatility context
+2. ใช้ Gaussian likelihood ทั้งที่ financial returns มี heavy tails
+3. ใช้ query-time volatility (\sigma_i) แทนทั้ง path (j \to i)
+4. association loss มีน้ำหนักแรงเกินไป เช่น `association_weight = 3.0`
+5. `softmax_product` อาจกด NLL spike ที่ควรเป็น anomaly
+6. reconstruction/association-first อาจไม่ตรงกับโจทย์ large log-return anomaly
+
+ดังนั้นแนวทางใหม่คือ:
+
+> เปลี่ยนจาก reconstruction/association-first เป็น next-step probabilistic density modeling
+
+---
+
+# 4. Task ใหม่ที่ต้อง implement
+
+ให้โมเดลเรียน:
+
+[
+p(r_{t+1}|X_t)
+]
+
+โดย:
+
+[
+X_t = [x_{t-59}, x_{t-58}, ..., x_t]
+]
+
+และ target คือ:
+
+[
+y_t = r_{t+1}
+]
+
+โมเดลต้องทำนาย distribution ของ return วันถัดไป ไม่ใช่ reconstruct input window
+
+---
+
+# 5. Feature ที่ต้องสร้าง
+
+ห้ามใช้แค่ `log_return_only`
+
+ให้สร้าง feature แบบ volatility-aware อย่างน้อย:
+
+[
+x_t =
+[
+r_t,
+|r_t|,
+r_t^2,
+rolling_vol_{5,t},
+rolling_vol_{20,t},
+rolling_vol_{60,t},
+return_z_{20,t}
+]
+]
+
+ถ้ามี volume ให้เพิ่ม:
+
+[
+volume_z_{20,t}
+]
+
+ถ้ามี OHLCV ให้เพิ่ม optional features:
+
+[
+high_low_range_t
+]
+
+[
+close_open_return_t
+]
+
+[
+ParkinsonVol_t
+]
+
+[
+GarmanKlassVol_t
+]
+
+---
+
+# 6. กฎสำคัญเรื่อง leakage
+
+ทุก rolling feature ต้องคำนวณแบบ causal
+
+เช่น rolling volatility ของวัน (t) ต้องใช้เฉพาะอดีตก่อนวัน (t):
+
+[
+rolling_vol_{20,t}
+==================
+
+std(r_{t-20}, ..., r_{t-1})
+]
+
+ไม่ควรรวม (r_t) ถ้าจะใช้ feature นี้เพื่อทำนาย (r_t)
+
+Scaler ต้อง fit เฉพาะ train set เท่านั้น แล้วค่อย apply ไป validation/test
+
+Threshold ต้องตั้งจาก validation set เท่านั้น ไม่ใช้ test set
+
+ห้ามใช้ข้อมูลอนาคตในการ normalize, rank, threshold หรือ feature engineering
+
+---
+
+# 7. Model Architecture ที่ต้องใช้
+
+ใช้ Transformer Encoder ได้เหมือนเดิม แต่เปลี่ยน output head เป็น Student-t distribution head
+
+[
+H_t = TransformerEncoder(X_t)
+]
+
+ใช้ hidden state ตัวสุดท้าย:
+
+[
+h_t = H_t[-1]
+]
+
+ทำนาย parameter:
+
+[
+\mu_{t+1} = f_\mu(h_t)
+]
+
+[
+\sigma_{t+1}
+============
+
+softplus(f_\sigma(h_t)) + \epsilon
+]
+
+[
+\nu_{t+1}
+=========
+
+2 + softplus(f_\nu(h_t))
+]
+
+หรือเริ่ม version แรกด้วย fixed degrees of freedom:
+
+[
+\nu = 5
+]
+
+ดังนั้น:
+
+[
+r_{t+1}
+\sim
+StudentT(\mu_{t+1}, \sigma_{t+1}, \nu)
+]
+
+---
+
+# 8. Loss หลักที่ต้องใช้
+
+ใช้ Student-t Negative Log-Likelihood เป็น loss หลัก
+
+[
+\mathcal{L}_{NLL}
+=================
+
+-\log p(r_{t+1}|\mu_{t+1},\sigma_{t+1},\nu)
+]
+
+Student-t likelihood คือ:
+
+[
+p(y|\mu,\sigma,\nu)
+===================
+
+\frac{\Gamma(\frac{\nu+1}{2})}
+{\Gamma(\frac{\nu}{2})\sqrt{\nu\pi}\sigma}
+\left[
+1+
+\frac{1}{\nu}
+\left(
+\frac{y-\mu}{\sigma}
+\right)^2
+\right]^{-\frac{\nu+1}{2}}
+]
+
+loss คือ:
+
+[
+\mathcal{L}_{NLL}
+=================
+
+-\log \Gamma\left(\frac{\nu+1}{2}\right)
++
+\log \Gamma\left(\frac{\nu}{2}\right)
++
+\frac{1}{2}\log(\nu\pi)
++
+\log \sigma
++
+\frac{\nu+1}{2}
+\log
+\left[
+1+
+\frac{1}{\nu}
+\left(
+\frac{y-\mu}{\sigma}
+\right)^2
+\right]
+]
+
+โดย:
+
+[
+y = r_{t+1}
+]
+
+objective หลัก:
+
+[
+\mathcal{L}
+===========
+
+\frac{1}{N}
+\sum_t
+\mathcal{L}_{NLL,t}
+]
+
+---
+
+# 9. Anomaly Score หลัก
+
+หลัง train เสร็จ ให้ใช้ NLL เป็น anomaly score หลัก:
+
+[
+S_{t+1}
+=======
+
+-\log p(r_{t+1}|X_t)
+]
+
+ถ้า (S_{t+1}) สูง แปลว่า return วันนั้น unlikely ภายใต้ distribution ที่โมเดลทำนายจากอดีต
+
+สามารถคำนวณ standardized residual เพื่อช่วยอธิบายได้:
+
+[
+z_{t+1}
+=======
+
+\frac{r_{t+1}-\mu_{t+1}}{\sigma_{t+1}}
+]
+
+แต่ score หลักคือ:
+
+[
+S_{t+1} = \mathcal{L}_{NLL,t+1}
+]
+
+---
+
+# 10. Phase การทดลองที่ต้องทำ
+
+## Phase 1: NLL-only baseline
+
+เริ่มจากตัด association prior ออกก่อน
+
+[
+\mathcal{L} = \mathcal{L}_{NLL}
+]
+
+config แนวคิด:
+
+```yaml
+experiment_name: phase4_student_t_nll_w60_multifeature
+
+data:
+  window_size: 60
+  target: next_day_log_return
+  features:
+    - log_return
+    - abs_log_return
+    - squared_log_return
+    - rolling_vol_5
+    - rolling_vol_20
+    - rolling_vol_60
+    - return_z_20
+    - volume_z_20
+
+model:
+  architecture: transformer_encoder
+  d_model: 128
+  n_heads: 4
+  e_layers: 3
+  output_head: student_t_distribution
+
+distribution:
+  type: student_t
+  nu_mode: fixed
+  nu_value: 5
+  sigma_activation: softplus
+  sigma_eps: 1.0e-6
+
+training:
+  objective: next_step_density_prediction
+  loss: student_t_nll
+  association_weight: 0.0
+  batch_size: 64
+  learning_rate: 1.0e-4
+  epochs: 50
+  early_stopping_patience: 10
+
+scoring:
+  score_mode: nll_only
+  anomaly_score: student_t_nll
+```
+
+นี่คือตัวหลักที่ต้องทำก่อน
+
+---
+
+## Phase 2: เปรียบเทียบกับ Gaussian NLL
+
+เพื่อเช็คว่า Student-t ช่วยจริงไหม ให้ทำ version:
+
+[
+r_{t+1}
+\sim
+Normal(\mu_{t+1},\sigma_{t+1}^2)
+]
+
+loss:
+
+[
+\mathcal{L}_{Gaussian}
+======================
+
+-\log p(r_{t+1}|\mu_{t+1},\sigma_{t+1})
+]
+
+แล้วเทียบกับ Student-t NLL
+
+จุดประสงค์คือพิสูจน์ว่า heavy-tail likelihood เหมาะกับ financial returns กว่า Gaussian หรือไม่
+
+---
+
+## Phase 3: เพิ่ม association prior เป็น regularizer
+
+หลังจาก NLL-only ทำงานได้แล้ว ค่อยเพิ่ม association loss กลับมาแบบน้ำหนักต่ำ
+
+[
+\mathcal{L}
+===========
+
+\mathcal{L}*{NLL}
++
+\lambda \mathcal{L}*{assoc}
+]
+
+โดยลอง:
+
+[
+\lambda \in {0.05, 0.1, 0.3, 1.0}
+]
+
+ไม่ควรเริ่มที่:
+
+```yaml
+association_weight: 3.0
+```
+
+เพราะอาจแรงเกินไปสำหรับ financial returns
+
+config แนวคิด:
+
+```yaml
+experiment_name: phase4_student_t_nll_plus_assoc_w60_multifeature
+
+association:
+  enabled: true
+  association_mode: student_t_log_return_likelihood
+  causal_mask: true
+  variance_mode: stepwise_accumulated
+  mean_mode: stepwise_accumulated
+  uniform_past_prior: true
+
+training:
+  loss_combine_mode: nll_plus_assoc
+  association_weight: 0.1
+
+scoring:
+  score_mode: nll_only
+```
+
+หมายเหตุ: ให้ score ด้วย `nll_only` ก่อน แล้วค่อย ablation ว่า association discrepancy ช่วยเป็น score เสริมหรือไม่
+
+---
+
+# 11. ถ้าจะสร้าง attention prior ใหม่ ต้องทำแบบนี้
+
+ห้ามใช้ Gaussian query-time parameter เป็นหลักแบบเดิมโดยไม่เทียบกับตัวใหม่
+
+prior ใหม่ควรใช้ stepwise accumulated mean/variance:
+
+[
+M_{i,j}^{h}
+===========
+
+\sum_{u=j+1}^{i}
+\alpha_u^h \Delta t_u
+]
+
+[
+V_{i,j}^{h}
+===========
+
+\sum_{u=j+1}^{i}
+(\sigma_u^h)^2 \Delta t_u
+]
+
+โดย cumulative return:
+
+[
+R_{j \to i}
+===========
+
+\sum_{u=j+1}^{i} r_u
+]
+
+ใช้ Student-t likelihood:
+
+[
+R_{j \to i}
+\sim
+StudentT(M_{i,j}^{h}, \sqrt{V_{i,j}^{h}}, \nu)
+]
+
+prior logit:
+
+[
+z_{i,j}^{h}
+===========
+
+\log p(R_{j \to i}|M_{i,j}^{h},V_{i,j}^{h},\nu)
++
+\log \frac{1}{i}
+]
+
+causal mask:
+
+[
+P_{i,j}^{h}=0
+\quad
+\text{if}
+\quad
+j \ge i
+]
+
+ยกเว้น row แรกสามารถให้ self mass ได้เพื่อหลีกเลี่ยง empty past
+
+normalize:
+
+[
+P_{i,j}^{h}
+===========
+
+softmax_{j<i}(z_{i,j}^{h})
+]
+
+association loss:
+
+[
+\mathcal{L}_{assoc}
+===================
+
+mean_{l,h,i}
+\left[
+KL(A_{i,:}^{l,h} || P_{i,:}^{h})
++
+KL(P_{i,:}^{h} || A_{i,:}^{l,h})
+\right]
+]
+
+แต่ต้องถือว่า association loss เป็น regularizer ไม่ใช่ signal หลัก
+
+---
+
+# 12. Score modes ที่ต้อง ablation
+
+ต้องเทียบ score modes ต่อไปนี้:
+
+```yaml
+score_modes:
+  - nll_only
+  - assoc_only
+  - nll_plus_assoc
+  - nll_times_assoc_raw
+  - softmax_product
+```
+
+ตัวหลักที่ต้องเริ่มคือ:
+
+```yaml
+score_mode: nll_only
+```
+
+เหตุผลคือโจทย์คือ large log-return anomaly ดังนั้นความ unlikely ของ return ควรเป็น signal หลัก
+
+ห้าม assume ว่า `softmax_product` ดีที่สุด เพราะใน financial returns association discrepancy อาจกด NLL spike ที่สำคัญ
+
+---
+
+# 13. Threshold ที่ต้องใช้
+
+เริ่มด้วย validation percentile
+
+[
+\tau = Q_{0.99}(S_{val})
+]
+
+ถือว่าเป็น anomaly ถ้า:
+
+[
+S_t > \tau
+]
+
+ให้ลองหลาย threshold:
+
+[
+Q_{0.95}, Q_{0.975}, Q_{0.99}, Q_{0.995}, Q_{0.999}
+]
+
+แต่ในรายงานหลักให้เน้น:
+
+```text
+Top 1%
+Top 0.5%
+Top 0.1%
+```
+
+หรือ percentile 99, 99.5, 99.9
+
+ถ้ามีเวลา ให้เพิ่ม EVT/POT threshold เป็น optional advanced analysis
+
+---
+
+# 14. Evaluation แบบไม่มี label รายวัน
+
+เนื่องจากงานนี้เป็น unsupervised/self-supervised anomaly detection การวัดผลหลักควรใช้ known event windows
+
+ตัวอย่าง event windows:
+
+```text
+COVID crash
+Flash crash
+Black Monday
+GameStop surge
+Banking crisis
+Earnings shock
+Market-wide volatility spike
+```
+
+Agent ต้องเตรียม event table ที่มี:
+
+```text
+event_name
+symbol หรือ market index
+start_date
+end_date
+event_type
+source/notes
+```
+
+ถ้าใช้ S&P500 หรือหุ้นรายตัว ให้ระบุให้ชัดว่า event ไหนใช้กับ market-wide และ event ไหนใช้กับ individual stock
+
+---
+
+# 15. Metrics หลักที่ต้องรายงาน
+
+## 15.1 Event Recall
+
+นิยาม event window:
+
+[
+E_k = [t_{start}, t_{end}]
+]
+
+ถือว่า event ถูกจับได้ ถ้ามีอย่างน้อยหนึ่งวันในช่วง event ที่ score เกิน threshold:
+
+[
+\max_{t \in E_k} S_t > \tau
+]
+
+ดังนั้น:
+
+[
+EventRecall
+===========
+
+\frac{
+\text{จำนวน event ที่จับได้}
+}{
+\text{จำนวน event ทั้งหมด}
+}
+]
+
+ต้องรายงาน Event Recall ที่ threshold หลายระดับ เช่น:
+
+```text
+Event Recall@Top1%
+Event Recall@Top0.5%
+Event Recall@Top0.1%
+```
+
+---
+
+## 15.2 Precision@K
+
+เรียงวันทั้งหมดตาม anomaly score จากมากไปน้อย
+
+[
+Precision@K
+===========
+
+\frac{
+\text{จำนวน top K days ที่อยู่ใน known event windows}
+}{
+K
+}
+]
+
+ต้องรายงาน เช่น:
+
+```text
+Precision@20
+Precision@50
+Precision@100
+Precision@Top1%
+```
+
+---
+
+## 15.3 Event Hit Rate@K
+
+ให้ top K anomaly days เป็น prediction set
+
+ถือว่า event (E_k) ถูก hit ถ้ามีอย่างน้อยหนึ่งวันใน top K อยู่ใน event window
+
+[
+HitRate@K
+=========
+
+\frac{
+\text{จำนวน event ที่ถูก hit โดย top K}
+}{
+\text{จำนวน event ทั้งหมด}
+}
+]
+
+รายงาน:
+
+```text
+Event Hit Rate@Top1%
+Event Hit Rate@Top0.5%
+Event Hit Rate@Top0.1%
+```
+
+---
+
+## 15.4 Mean Best Rank
+
+เรียง score ทุกวันจากมากไปน้อย
+
+[
+Rank(t)
+=======
+
+\text{อันดับของ } S_t
+]
+
+สำหรับ event (E_k):
+
+[
+BestRank(E_k)
+=============
+
+\min_{t \in E_k} Rank(t)
+]
+
+รายงาน:
+
+[
+MeanBestRank
+============
+
+\frac{1}{K}
+\sum_k BestRank(E_k)
+]
+
+ยิ่งต่ำยิ่งดี
+
+ต้องรายงานทั้งค่าเฉลี่ยและ table ราย event
+
+---
+
+## 15.5 AUC-PR ถ้ามี label รายวัน
+
+ถ้ามี label รายวันจาก event windows โดยกำหนดว่า:
+
+[
+y_t = 1
+\quad
+\text{if } t \in \text{known event windows}
+]
+
+และ:
+
+[
+y_t = 0
+\quad
+\text{otherwise}
+]
+
+สามารถรายงาน:
+
+```text
+AUC-PR
+Precision
+Recall
+F1
+```
+
+แต่ต้องระบุชัดว่า label นี้เป็น weak label จาก event windows ไม่ใช่ ground truth anomaly label สมบูรณ์
+
+อย่าเน้น Accuracy
+
+---
+
+# 16. Baselines ที่ต้องเปรียบเทียบ
+
+Agent ต้องสร้าง baseline อย่างน้อย 4 กลุ่ม
+
+## Baseline A: Rolling z-score
+
+[
+z_t =
+\frac{r_t - \mu_{t,20}}{\sigma_{t,20}}
+]
+
+score:
+
+[
+S_t = |z_t|
+]
+
+ควรลอง window:
+
+```text
+20, 60
+```
+
+---
+
+## Baseline B: Gaussian NLL Transformer
+
+[
+r_{t+1}
+\sim
+Normal(\mu_{t+1},\sigma_{t+1}^2)
+]
+
+score:
+
+[
+S_t =
+-\log p(r_t|\mu_t,\sigma_t)
+]
+
+ใช้เพื่อเทียบกับ Student-t ว่า heavy-tail likelihood ช่วยไหม
+
+---
+
+## Baseline C: Student-t NLL Transformer
+
+ตัวหลักของงาน
+
+[
+r_{t+1}
+\sim
+StudentT(\mu_{t+1},\sigma_{t+1},\nu)
+]
+
+score:
+
+[
+S_t =
+-\log p(r_t|\mu_t,\sigma_t,\nu)
+]
+
+---
+
+## Baseline D: Reconstruction model
+
+ใช้ Autoencoder หรือ Anomaly Transformer original
+
+score:
+
+[
+S_t =
+|X_t-\hat{X}_t|^2
+]
+
+ใช้เพื่อพิสูจน์ว่า NLL เหมาะกว่า reconstruction สำหรับ large return anomaly หรือไม่
+
+---
+
+## Baseline E: Student-t NLL + Association
+
+[
+\mathcal{L}
+===========
+
+\mathcal{L}*{NLL}
++
+\lambda \mathcal{L}*{assoc}
+]
+
+ใช้เพื่อเช็คว่า association prior ช่วยจริงไหม
+
+---
+
+## Optional Baseline F: GARCH-t
+
+ถ้าทำได้ ให้ใช้เป็น financial econometrics baseline
+
+[
+r_t = \mu_t + \sigma_t \epsilon_t
+]
+
+[
+\epsilon_t \sim StudentT(\nu)
+]
+
+score:
+
+[
+S_t =
+-\log p(r_t|\mu_t,\sigma_t,\nu)
+]
+
+ถ้า deep model แพ้ GARCH-t ต้องรายงานอย่างตรงไปตรงมา
+
+---
+
+# 17. ตารางผลที่ต้องรายงาน
+
+Agent ต้องสร้างตารางหลักอย่างน้อยนี้:
+
+| Model                     | Features      | Score       | Threshold | Precision@K | Event Recall | Hit Rate@K | Mean Best Rank | AUC-PR |     |     |
+| ------------------------- | ------------- | ----------- | --------- | ----------: | -----------: | ---------: | -------------: | -----: | --- | --- |
+| Rolling Z-score           | log_return    | (           | z_t       |           ) |        Top1% |        ... |            ... |    ... | ... | ... |
+| Gaussian NLL Transformer  | multi-feature | NLL         | Top1%     |         ... |          ... |        ... |            ... |    ... |     |     |
+| Student-t NLL Transformer | multi-feature | NLL         | Top1%     |         ... |          ... |        ... |            ... |    ... |     |     |
+| Reconstruction AE/AT      | multi-feature | Recon error | Top1%     |         ... |          ... |        ... |            ... |    ... |     |     |
+| Student-t NLL + Assoc     | multi-feature | NLL/Assoc   | Top1%     |         ... |          ... |        ... |            ... |    ... |     |     |
+| GARCH-t                   | log_return    | NLL         | Top1%     |         ... |          ... |        ... |            ... |    ... |     |     |
+
+ถ้าไม่มี AUC-PR เพราะไม่มี weak daily label ให้ใส่ N/A และอธิบาย
+
+---
+
+# 18. รูปภาพ / Visualization ที่ต้องทำ
+
+Agent ต้องสร้างรูปหลักต่อไปนี้
+
+## Figure 1: Time series with anomaly score
+
+กราฟราคา หรือ log return พร้อม anomaly score
+
+ควรมี panels:
+
+1. price หรือ adjusted close
+2. log return
+3. anomaly score (S_t)
+4. threshold line (\tau)
+5. shaded known event windows
+
+จุดประสงค์: แสดงว่า score สูงตรงช่วง event หรือไม่
+
+---
+
+## Figure 2: Top anomaly days on return chart
+
+plot log return แล้ว mark top anomaly days เช่น Top1%
+
+ใช้สี/marker แยก:
+
+```text
+known event hit
+false positive / unknown anomaly
+```
+
+จุดประสงค์: ดูว่า top anomalies อยู่ตรงวันที่ return แรงจริงไหม
+
+---
+
+## Figure 3: NLL vs absolute return scatter
+
+แกน x:
+
+[
+|r_t|
+]
+
+แกน y:
+
+[
+S_t = NLL_t
+]
+
+จุดประสงค์: ตรวจว่า score สูงขึ้นตาม return magnitude หรือไม่ และมีวันที่ NLL สูงแม้ return ไม่ใหญ่มากเพราะ volatility regime ต่ำหรือไม่
+
+---
+
+## Figure 4: Standardized residual plot
+
+plot:
+
+[
+z_t =
+\frac{r_t-\mu_t}{\sigma_t}
+]
+
+พร้อมเส้น:
+
+[
+z = \pm 2, \pm 3, \pm 5
+]
+
+จุดประสงค์: ตรวจ calibration และความ extreme ของ event days
+
+---
+
+## Figure 5: Predicted volatility vs realized volatility
+
+plot:
+
+[
+\sigma_t
+]
+
+เทียบกับ:
+
+[
+rolling_vol_{20,t}
+]
+
+หรือ realized volatility proxy
+
+จุดประสงค์: เช็คว่าโมเดลเรียน volatility regime ได้จริงหรือไม่
+
+---
+
+## Figure 6: Event window zoom-in
+
+เลือก event สำคัญ เช่น COVID crash หรือ GameStop
+
+ทำ zoom-in chart ที่มี:
+
+```text
+price
+log_return
+NLL score
+threshold
+predicted sigma
+```
+
+จุดประสงค์: แสดงเชิงคุณภาพว่าโมเดลตอบสนองกับเหตุการณ์อย่างไร
+
+---
+
+## Figure 7: Model comparison bar chart
+
+เปรียบเทียบ:
+
+```text
+Event Recall@Top1%
+Precision@Top1%
+Mean Best Rank
+AUC-PR
+```
+
+ของแต่ละ model
+
+จุดประสงค์: แสดงว่า Student-t NLL ดีกว่า baseline หรือไม่
+
+---
+
+## Figure 8: Attention heatmap เฉพาะถ้าใช้ association
+
+ถ้าใช้ association prior ให้แสดง:
+
+1. learned attention (A_{i,j}^{l,h})
+2. prior attention (P_{i,j}^{h})
+3. discrepancy heatmap
+
+สำหรับ event day และ normal day
+
+จุดประสงค์: เช็คว่า association prior มีความหมายจริงไหม
+
+ถ้าไม่ได้ใช้ association ใน final model ไม่ต้องบังคับทำ figure นี้
+
+---
+
+# 19. Checklists ที่ต้องตรวจ
+
+## Data checks
+
+ต้องรายงาน:
+
+```text
+จำนวน symbol
+ช่วงวันที่ train/val/test
+จำนวนวันทั้งหมด
+จำนวน missing values
+จำนวน window ที่สร้างได้
+feature columns ที่ใช้จริง
+scaler fit จาก train เท่านั้นหรือไม่
+rolling features causal หรือไม่
+```
+
+---
+
+## Model checks
+
+ต้องรายงาน:
+
+```text
+loss curve train/val
+ค่า sigma min/mean/max
+ค่า nu ถ้าเรียนได้
+มี NaN/Inf หรือไม่
+gradient exploding หรือไม่
+NLL distribution train/val/test
+```
+
+---
+
+## Score checks
+
+ต้องรายงาน:
+
+```text
+score mean/std/percentiles
+threshold ที่ใช้
+จำนวน anomaly days ที่ threshold แต่ละระดับ
+top 20 anomaly days พร้อมวันที่และ event match
+```
+
+---
+
+## Evaluation checks
+
+ต้องรายงาน:
+
+```text
+event table ที่ใช้
+แต่ละ event ถูก detect หรือไม่
+best rank ของแต่ละ event
+best score ของแต่ละ event
+จำนวน false positives หรือ unknown high-score days
+```
+
+---
+
+# 20. รายงานผลที่ต้องเขียน
+
+รายงานต้องมี sections:
+
+## 20.1 Problem Setup
+
+อธิบายว่าโจทย์คือ unsupervised/self-supervised anomaly detection สำหรับ stock log return
+
+ไม่ใช้ anomaly label ตอน train
+
+## 20.2 Method
+
+อธิบาย next-step density prediction:
+
+[
+p(r_{t+1}|X_t)
+]
+
+และ Student-t NLL:
+
+[
+S_{t+1}
+=======
+
+-\log p(r_{t+1}|X_t)
+]
+
+## 20.3 Features
+
+อธิบายว่าทำไมต้องใช้ volatility-aware features ไม่ใช่ log return อย่างเดียว
+
+## 20.4 Baselines
+
+รายงาน Rolling z-score, Gaussian NLL, Reconstruction, Student-t NLL, Student-t NLL + Association, optional GARCH-t
+
+## 20.5 Evaluation
+
+อธิบาย event-based evaluation:
+
+[
+EventRecall
+]
+
+[
+Precision@K
+]
+
+[
+HitRate@K
+]
+
+[
+MeanBestRank
+]
+
+และ AUC-PR ถ้ามี weak daily labels
+
+## 20.6 Results
+
+ใส่ตาราง metric และรูป visualization ตามที่กำหนด
+
+## 20.7 Ablation
+
+ต้องตอบคำถามเหล่านี้:
+
+1. Multi-feature ดีกว่า log_return_only หรือไม่
+2. Student-t ดีกว่า Gaussian หรือไม่
+3. NLL ดีกว่า reconstruction หรือไม่
+4. Association prior ช่วยหรือทำให้แย่ลง
+5. `softmax_product` ดีกว่า `nll_only` จริงไหม
+6. Stepwise accumulated prior ดีกว่า query-time prior หรือไม่
+
+## 20.8 Discussion
+
+อธิบายอย่างตรงไปตรงมา:
+
+* ถ้า Student-t NLL ดีกว่า: เพราะมันจับ tail risk และ volatility context ได้ดีกว่า
+* ถ้า GARCH-t ชนะ: deep model ยังไม่คุ้ม หรือ feature/model ยังไม่ดีพอ
+* ถ้า association prior ไม่ช่วย: prior อาจไม่สอดคล้องกับ financial attention pattern
+* ถ้า false positives เยอะ: อาจเป็น unknown event หรือ threshold sensitive
+
+## 20.9 Limitations
+
+ต้องระบุ:
+
+```text
+ไม่มี ground-truth anomaly label ที่สมบูรณ์
+known event windows เป็น weak labels
+financial anomalies มีหลายชนิด
+large return อาจเกิดจากข่าวเฉพาะหุ้น
+daily data อาจพลาด intraday flash events
+threshold มีผลต่อผลลัพธ์มาก
+```
+
+---
+
+# 21. Output ไฟล์ที่ Agent ควรส่งกลับ
+
+Agent ควรส่งกลับอย่างน้อย:
+
+```text
+1. config files ใหม่
+2. feature generation script หรือคำอธิบาย feature
+3. training logs
+4. anomaly scores CSV
+5. top anomaly days CSV
+6. event detection table CSV
+7. metrics summary table
+8. figures ทั้งหมด
+9. short report สรุปผล
+```
+
+ตัวอย่างไฟล์:
+
+```text
+outputs/phase4_student_t_nll/scores.csv
+outputs/phase4_student_t_nll/top_anomalies.csv
+outputs/phase4_student_t_nll/event_detection.csv
+outputs/phase4_student_t_nll/metrics_summary.csv
+outputs/phase4_student_t_nll/figures/timeseries_score.png
+outputs/phase4_student_t_nll/figures/event_zoom_covid.png
+outputs/phase4_student_t_nll/report.md
+```
+
+---
+
+# 22. เกณฑ์ตัดสินว่าโมเดลดีขึ้นจริงหรือไม่
+
+ถือว่าโมเดลใหม่ดีขึ้น ถ้า:
+
+1. Event Recall@Top1% สูงกว่า rolling z-score และ reconstruction baseline
+2. Precision@K สูงกว่า baseline
+3. Mean Best Rank ต่ำกว่า baseline
+4. Top anomaly days มีเหตุผลทางการเงิน ไม่ใช่ random noise
+5. Predicted (\sigma_t) สัมพันธ์กับ realized volatility
+6. Event windows สำคัญ เช่น COVID crash หรือ GameStop ได้ score สูง
+7. Student-t NLL ดีกว่า Gaussian NLL หรืออย่างน้อยไม่แย่กว่า
+8. Association prior ถ้าเพิ่มแล้วต้อง improve metric ชัดเจน ไม่ใช่เพิ่มเพราะทฤษฎีดูดี
+
+ถ้า association model ไม่ชนะ NLL-only ให้เลือก NLL-only เป็น final model
+
+---
+
+# 23. Final recommendation ที่ต้องยึด
+
+Default final model ควรเป็น:
+
+[
+X_t = [x_{t-59}, ..., x_t]
+]
+
+[
+r_{t+1}
+\sim
+StudentT(\mu_{t+1},\sigma_{t+1},\nu)
+]
+
+[
+\mu_{t+1}, \sigma_{t+1}, \nu
+============================
+
+f_\theta(X_t)
+]
+
+[
+\mathcal{L}
+===========
+
+-\log p(r_{t+1}|\mu_{t+1},\sigma_{t+1},\nu)
+]
+
+[
+S_{t+1}
+=======
+
+-\log p(r_{t+1}|\mu_{t+1},\sigma_{t+1},\nu)
+]
+
+ถ้า:
+
+[
+S_{t+1} > \tau
+]
+
+ให้ถือว่าเป็น anomaly
+
+โดย:
+
+[
+\tau = Q_{0.99}(S_{val})
+]
+
+หรือ threshold จาก Top1%
+
+---
+
+# 24. สรุปสั้นที่สุดให้ Agent จำ
+
+ทำโมเดลให้เรียน distribution ของ return วันถัดไปจากอดีต 60 วัน ไม่ใช่ reconstruct input
+
+ใช้ Student-t NLL เป็น loss และ anomaly score
+
+เพิ่ม volatility-aware features
+
+วัดผลแบบ event-based ไม่ใช้ accuracy เป็นหลัก
+
+เทียบกับ rolling z-score, Gaussian NLL, reconstruction, และ association version
+
+ถ้า association prior ไม่ช่วย ให้เลือก NLL-only
+
+รายงานด้วยตาราง metric, top anomaly days, event hit table, และรูป score บน time series
+
+อย่าหลุดไป train supervised classifier เว้นแต่ระบุว่าเป็น baseline แยก

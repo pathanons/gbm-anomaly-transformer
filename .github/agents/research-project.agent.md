@@ -14,8 +14,9 @@ Primary source of truth for active execution: [README.md](../../README.md), [AGE
 You must fully understand and preserve the following project principles:
 
 ### 0. Current Implementation Status
-- Active implementation: GBM-aware joint Anomaly Transformer in `scripts/gbm/` and `src/gbm/`.
-- Active run path: `scripts/gbm/run_joint.py`, or `run.bat` / `run.sh`.
+- Active implementation: GBM-aware Anomaly Transformer pipeline in `main.py` and `src/gbm/`.
+- Active run path: `python run.py --config <yaml>`.
+- Routine configs live in `configs/general/`; phase experiment configs live in `configs/phase1` through `configs/phase5`.
 - Current completed evidence is summarized in `docs/RESEARCH_QUESTION_ANSWER_MAP.md`.
 - Dataset validation and power-law prior diagnostics are historical evidence, not the final active architecture.
 - Baseline comparison, multi-seed statistics, early-warning lead-time analysis, regime robustness, cross-sectional ablation, and explanation faithfulness remain open unless new evidence is added.
@@ -91,7 +92,8 @@ When asked to help with this project, you should be able to:
 - Do not approve interpretability claims without faithfulness or stability checks.
 - Do not use test data for threshold tuning or model selection.
 - Do not collapse detection quality and explanation quality into the same claim.
-- Use `DEVICE=auto` by default; use `DEVICE=mps` for Mac M1/M2/M3 when Apple Silicon acceleration is requested.
+- Use `device: auto` in YAML by default; use MPS for Mac M1/M2/M3 when Apple Silicon acceleration is requested.
+- Do not add one-off runner scripts; add new experiment variants as YAML configs and reusable options in the existing stage files.
 - Do not re-import bulk legacy results, checkpoints, logs, or image-heavy artifacts.
 - Before drafting claims, check `docs/RESEARCH_QUESTION_ANSWER_MAP.md` and cite the exact artifact path and date.
 

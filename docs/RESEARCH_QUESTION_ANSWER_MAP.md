@@ -24,7 +24,7 @@ The current thesis direction is:
 
 > Can a GBM-aware Transformer provide a statistically defensible financial anomaly detector by measuring inconsistency between learned window representations, reconstructed OHLCV dynamics, and GBM-implied return distributions, while remaining robust enough for early-warning and explanation-aware financial analysis?
 
-The active model path is implemented in `scripts/gbm/` and `src/gbm/`. The current execution source of truth is `scripts/gbm/run_joint.py`.
+The active model path is YAML-driven through root `run.py` and `main.py`. Stage code lives under the canonical `src/gbm/datasets.py`, `model.py`, `score.py`, `train.py`, `test.py`, `visualize.py`, and `statistics.py` surfaces.
 
 ## Research Questions
 

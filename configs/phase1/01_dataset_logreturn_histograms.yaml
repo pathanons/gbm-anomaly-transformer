@@ -1,0 +1,7 @@
+pipeline: dataset_logreturn_histograms
+data_path: datasets/SP500_logreturn_volume_w{window_size}
+tickers: all
+window_size: 30,60,90,128
+anomaly_label_column: log_return_anomaly
+histogram_all_out: D:/AnomalyTransformerRuns/findings/datasets_validation/histogram_logreturn_all/w{window_size}
+histogram_anomaly_out: D:/AnomalyTransformerRuns/findings/datasets_validation/histogram_logreturn_anomaly/w{window_size}

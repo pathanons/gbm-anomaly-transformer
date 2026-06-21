@@ -1,0 +1,8 @@
+pipeline: endpoint_logreturn_score_panels
+csv: D:/AnomalyTransformerRuns/experiments/best_model_config_final/reports/test_scores.csv
+data_path: datasets/SP500_event_taxonomy_w100
+out: D:/AnomalyTransformerRuns/experiments/best_model_config_final/figures/endpoint_logreturn_robust_score_panels
+split: test
+tickers: all
+base_score_column: score
+robust_score_column: nll_robust_softmax_assoc_score

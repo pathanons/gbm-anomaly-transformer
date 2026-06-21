@@ -1,153 +1,76 @@
 # GBM Anomaly Transformer
 
-GBM-aware Anomaly Transformer workspace for pooled, multi-ticker financial anomaly detection on S&P 500-style OHLCV windows.
-
-The active path is the joint GBM pipeline:
-
-```text
-scripts/gbm/run_joint.py
-  -> train_joint.py
-  -> validate_joint.py
-  -> test_joint.py
-  -> visualize_joint.py optional
-```
-
-## Active Layout
-
-```text
-configs/                example configs
-datasets/               prepared OHLCV and anomaly-label CSVs
-scripts/gbm/            train, validate, test, visualize, score-change tools
-scripts/data_prep/      event-taxonomy dataset generation utilities
-src/gbm/                model, data loading, losses, metrics, scoring, device helpers
-utils/                  shared dataset and validation helpers
-docs/legacy/            curated old reports, insights, and research context
-.github/                agent prompts and review instructions
-.codex/skills/          repo-local Codex skill for this project
-```
-
-Generated outputs go under `results/experiments/<exp-name>/` and are ignored by git.
-
-## Quick Run
-
-Windows:
-
-```bat
-run.bat --visualize
-```
-
-macOS/Linux:
+This repo now uses one YAML-driven entry point:
 
 ```bash
-bash run.sh --visualize
+python run.py --config configs/phase3/example_log_return.yaml
 ```
 
-Both scripts default to:
-
-```text
-EXP_NAME=experiment3_joint
-DATA_PATH=datasets/SP500_event_taxonomy_w100
-WINDOW_SIZE=100
-FEATURES=all
-BATCH_SIZE=32
-EPOCHS=20
-DEVICE=auto
-```
-
-Override defaults with environment variables or append any `run_joint.py` flags:
+Use `--dry-run` to print the resolved experiment without training:
 
 ```bash
-EXP_NAME=experiment3_mps DEVICE=mps EPOCHS=5 bash run.sh --visualize
+python run.py --config configs/phase3/example_log_return.yaml --dry-run
 ```
 
-```bat
-set DEVICE=mps
-set EPOCHS=5
-run.bat --visualize
-```
+## Active Python Surface
 
-## Device Support
+The active code is organized by pipeline stage:
 
-`DEVICE=auto` resolves in this order:
+- `main.py` - config dispatcher and experiment orchestration
+- `run.py` - thin executable entry point
+- `src/gbm/datasets.py` - data preparation and windows
+- `src/gbm/model.py` - model definitions
+- `src/gbm/score.py` - loss and score definitions
+- `src/gbm/train.py` - training
+- `src/gbm/test.py` - validation, testing, and score export
+- `src/gbm/visualize.py` - plots and visual diagnostics
+- `src/gbm/statistics.py` - statistics, baselines, and evaluation
 
-```text
-cuda -> mps -> cpu
-```
+Experiment choices live in YAML, not in separate runner filenames.
 
-Use `--device mps` or `DEVICE=mps` on Mac M1/M2/M3. The entry points set `PYTORCH_ENABLE_MPS_FALLBACK=1` so unsupported MPS operations can fall back to CPU instead of crashing.
+## General Configs
 
-## Mac M1/M2/M3 Setup
-
-Use the no-CUDA conda environment:
+Use these for normal reruns:
 
 ```bash
-conda env create -f environment.macos-mps.yml
-conda activate gbm-anomaly-transformer-mps
-DEVICE=mps bash run.sh --visualize
+python run.py --config configs/general/data_prepare.yaml
+python run.py --config configs/general/train.yaml
+python run.py --config configs/general/test.yaml
+python run.py --config configs/general/visualize.yaml
+python run.py --config configs/general/best_model_suite.yaml --dry-run
 ```
 
-For pip-based setup:
+Run the fast pytest gate before long experiments:
 
-```bash
-python -m venv .venv
-source .venv/bin/activate
-python -m pip install --upgrade pip
-python -m pip install -r requirements.txt
-DEVICE=mps bash run.sh --visualize
+```powershell
+python -m pytest unittest
 ```
 
-## Windows CUDA/CPU Setup
+On Windows, the curated best-model launcher is:
 
-Use your existing PyTorch install if it already matches your CUDA version. For CPU-only smoke checks, set:
-
-```bat
-set DEVICE=cpu
-run.bat --epochs 1
+```powershell
+best.bat
 ```
 
-## Main Outputs
+Useful checks:
 
-```text
-results/experiments/experiment3_joint/models/
-results/experiments/experiment3_joint/reports/
-results/experiments/experiment3_joint/splits/
-results/experiments/experiment3_joint/visualizations/
+```powershell
+best.bat --test-only
+best.bat --dry-run
 ```
 
-Key report files:
+## Configs By Phase
 
-```text
-gbm_joint_threshold.json
-gbm_joint_validation_scores.csv
-gbm_joint_test_scores.csv
-gbm_joint_metrics.json
-gbm_joint_metrics_by_ticker.csv
+- `configs/general/` - routine data preparation, train, test, configurable MAD visualization, and best-model suite configs
+- `configs/phase1/` - data preparation, data statistics, legacy/refactored score checks, loss ablation
+- `configs/phase2/` - distribution-shift score modes: legacy, refactored, QW2, QW2Tail
+- `configs/phase3/` - log-return/canonical model configs and association-mode ablations
+- `configs/phase4/` - MAD threshold visualization diagnostics
+- `configs/phase5/` - statistical baselines and score/component ablation
+
+Large outputs should go outside the repo. Recommended Windows output root:
+
+```powershell
+$env:AT_OUTPUT_ROOT = "D:/AnomalyTransformerRuns"
+python run.py --config configs/phase3/example_log_return.yaml
 ```
-
-## Legacy Context
-
-Only important old context was imported:
-
-```text
-docs/legacy/docs/
-docs/legacy/experiment-insights/
-docs/legacy/gbm-report-summaries/
-docs/legacy/ticker-insight-json/
-```
-
-Large generated outputs, checkpoints, logs, and image-heavy result folders were intentionally left out.
-
-## Agent And Codex Context
-
-Repo-local guidance lives in:
-
-```text
-AGENTS.md
-.codex/skills/gbm-anomaly-transformer/SKILL.md
-.github/copilot-instructions.md
-.github/agents/
-.github/instructions/
-.github/prompts/
-```
-
-Agents should treat `scripts/gbm/run_joint.py`, `src/gbm/device.py`, and this README as the current source of truth for running experiments.

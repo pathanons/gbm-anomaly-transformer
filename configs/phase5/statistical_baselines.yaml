@@ -1,0 +1,16 @@
+exp_name: baseline_comparison
+pipeline: baseline
+data_path: datasets/SP500_event_taxonomy_w100
+tickers: all
+device: auto
+features: all
+normalize_batch: false
+batch_size: 32
+epochs: 20
+lr: 0.001
+window_size: 100
+step: 1
+seed: 42
+patience: 5
+baselines: all
+skip_existing: true

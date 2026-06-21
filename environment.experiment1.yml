@@ -12,9 +12,9 @@ dependencies:
   - scikit-learn>=1.0
   - scipy>=1.10
   - pyyaml>=6.0
-  - pytorch>=2.3
-  - pytorch-cuda=12.1
-  - torchvision
-  - torchaudio
+  - pytorch=2.6.0
+  - pytorch-cuda=12.4
+  - torchvision=0.21.0
+  - torchaudio=2.6.0
   - pip:
       - yfinance>=0.2.32

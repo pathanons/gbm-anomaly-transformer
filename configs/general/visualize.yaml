@@ -1,0 +1,6 @@
+pipeline: mad_visualize
+csv: D:/AnomalyTransformerRuns/experiments/train_w100_log_return/reports/test_scores.csv
+out: D:/AnomalyTransformerRuns/experiments/train_w100_log_return/figures/mad_k9
+label_names: jump,drop,volatility_shock
+price_dir: datasets/SP500
+price_z_thr: 3.0
