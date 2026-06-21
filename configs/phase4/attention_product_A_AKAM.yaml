@@ -1,8 +1,6 @@
-# Export and plot attention diagnostics for the current best checkpoint.
-# This is diagnostic visualization, not model selection.
-# Run:
-#   python run.py --config configs/attention_best.yaml --dry-run
-#   python run.py --config configs/attention_best.yaml
+# Attention diagnostics for A/AKAM using product score:
+#   raw = nll * association_discrepancy
+# then delta_score = abs(diff(robust_z(raw))) and k=10 MAD overlap filtering.
 pipeline: attention_visualize
 exp_name: best_nllassoc_w100_h2_l4_lr0p00005_ep20_s42
 output_root: D:/AnomalyTransformerRuns
@@ -37,8 +35,16 @@ quantile_count: 21
 tail_weight_gamma: 2.0
 tail_weight_power: 2.0
 attention_split: test
-attention_top_k: 5
-attention_select_by: association_discrepancy
-attention_layer: last
-attention_head: 0
+attention_tickers: A,AKAM
+attention_select_by: delta_mad_spike
+attention_score_formula: product
+attention_mad_k: 10.0
+attention_top_k: all
+attention_overlap_only: true
+attention_mask_diagonal: true
+attention_out: D:/AnomalyTransformerRuns/experiments/best_nllassoc_w100_h2_l4_lr0p00005_ep20_s42/reports/attention_product_mad10_overlap_A_AKAM_all_layers_heads_no_diag
+attention_layer: all
+attention_head: all
 attention_make_plots: true
+price_dir: datasets/SP500
+price_z_thr: 3.0

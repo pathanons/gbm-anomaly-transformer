@@ -13,11 +13,27 @@ from typing import List
 import pandas as pd
 
 
-LABEL_CANDIDATES = ["jump", "drop", "volume_spike", "volatility_shock", "regime_shift", "criterion_a", "criterion_b", "criterion_c"]
+LABEL_CANDIDATES = [
+    "log_return_anomaly",
+    "volume_anomaly",
+    "jump",
+    "drop",
+    "volume_spike",
+    "volatility_shock",
+    "regime_shift",
+    "criterion_a",
+    "criterion_b",
+    "criterion_c",
+]
 
 
 def detect_label_columns(df: pd.DataFrame) -> List[str]:
     preferred = [col for col in LABEL_CANDIDATES if col in df.columns]
     if preferred:
         return preferred
-    return [col for col in df.columns if col not in {"Date", "regime", "is_anomaly"} and pd.api.types.is_numeric_dtype(df[col])]
+    return [
+        col
+        for col in df.columns
+        if col not in {"Date", "split", "regime", "is_anomaly", "high_swing"}
+        and pd.api.types.is_numeric_dtype(df[col])
+    ]

@@ -14,6 +14,7 @@ PIPELINES = {
     "log_return",
     "baseline",
     "data_prepare",
+    "stock_feature_prepare",
     "statistical_baseline",
     "score_ablation",
     "mad_visualize",
@@ -22,6 +23,11 @@ PIPELINES = {
     "validate",
     "visualize",
     "attention_visualize",
+    "model_diagnostic_panels",
+    "endpoint_logreturn_score_panels",
+    "nextday_report_figures",
+    "dataset_difference_histograms",
+    "dataset_logreturn_histograms",
     "experiment_suite",
 }
 
@@ -29,6 +35,7 @@ GBM_DEFAULTS = {
     "output_root": None,
     "device": "auto",
     "features": "all",
+    "target": "window_returns",
     "split_method": "chronological",
     "purge_gap": None,
     "batch_size": 32,
@@ -44,6 +51,7 @@ GBM_DEFAULTS = {
     "predictive_distribution": "gaussian",
     "association_mode": "gaussian_log_return",
     "loss_mode": "legacy",
+    "loss_combine_mode": "weighted_sum",
     "patience": 5,
     "dist_weight": 1.0,
     "recon_weight": 1.0,
@@ -61,16 +69,27 @@ GBM_DEFAULTS = {
     "normalize_batch": False,
     "include_anomalous_train": False,
     "visualize": False,
+    "outlier_k": 9.0,
+    "score_formula": "sum",
+    "mad_out": None,
+    "threshold_mode": "delta",
     "show_true_labels": False,
     "full_context": False,
     "fast_export": False,
     "attention_split": "test",
     "attention_top_k": 5,
+    "attention_per_ticker": None,
     "attention_select_by": "association_discrepancy",
     "attention_score_csv": None,
     "attention_out": None,
     "attention_layer": 0,
     "attention_head": 0,
+    "attention_mad_k": 10.0,
+    "attention_score_formula": "sum",
+    "attention_overlap_only": False,
+    "attention_mask_diagonal": False,
+    "price_dir": "datasets/SP500",
+    "price_z_thr": 3.0,
     "attention_make_plots": True,
 }
 
@@ -190,6 +209,8 @@ def normalize_common(values: dict[str, object]) -> dict[str, object]:
     values["full_context"] = as_bool(values.get("full_context"))
     values["fast_export"] = as_bool(values.get("fast_export"))
     values["attention_make_plots"] = as_bool(values.get("attention_make_plots"), default=True)
+    values["attention_overlap_only"] = as_bool(values.get("attention_overlap_only"), default=False)
+    values["attention_mask_diagonal"] = as_bool(values.get("attention_mask_diagonal"), default=False)
     return values
 
 
@@ -232,6 +253,26 @@ def run_gbm_config(config: dict[str, object], window_size: int, exp_name: str, d
     train_model(args)
     validate_model(args)
     test_model(args)
+    if getattr(args, "visualize", False):
+        from src.gbm.datasets import get_run_dir
+        from src.gbm.visualize import run_mad_visualize
+
+        k_tag = str(float(getattr(args, "outlier_k", 9.0))).rstrip("0").rstrip(".").replace(".", "p")
+        run_dir = get_run_dir(args.exp_name, getattr(args, "output_root", None))
+        score_csv = run_dir / "reports" / "test_scores.csv"
+        out_dir = Path(str(getattr(args, "mad_out", "") or (run_dir / "figures" / f"mad_k{k_tag}")))
+        viz_args = Namespace(
+            csv=str(score_csv),
+            out=str(out_dir),
+            tickers=getattr(args, "tickers", None),
+            label_names=getattr(args, "label_names", None),
+            price_dir=getattr(args, "price_dir", "datasets/SP500"),
+            price_z_thr=getattr(args, "price_z_thr", 3.0),
+            outlier_k=getattr(args, "outlier_k", 9.0),
+            score_formula=getattr(args, "score_formula", "sum"),
+            threshold_mode=getattr(args, "threshold_mode", "delta"),
+        )
+        run_mad_visualize(viz_args)
 
 
 def suite_trials(config: dict[str, object]) -> list[dict[str, object]]:
@@ -345,6 +386,7 @@ def run_data_prepare(config: dict[str, object], window_size: int, exp_name: str,
         split_method=args.split_method,
         purge_gap=args.purge_gap,
         train_normal_only=not args.include_anomalous_train,
+        target=getattr(args, "target", "window_returns"),
     )
     run_dir = get_run_dir(args.exp_name, args.output_root)
     manifest_path = save_joint_manifest(
@@ -357,6 +399,7 @@ def run_data_prepare(config: dict[str, object], window_size: int, exp_name: str,
         split_method=args.split_method,
         purge_gap=args.purge_gap,
         train_normal_only=not args.include_anomalous_train,
+        target=getattr(args, "target", "window_returns"),
     )
     print(f"[main] prepared windows={len(manifest)} manifest={manifest_path}")
 
@@ -380,6 +423,24 @@ def run_config(config_path: Path, dry_run: bool) -> None:
             default_name = f"{base_exp_name}_w{window_size}" if len(window_sizes) > 1 else base_exp_name
             exp_name = resolve_template(config.get("exp_name"), window_size, default_name)
             run_data_prepare(config, window_size, exp_name, dry_run)
+        return
+
+    if pipeline == "stock_feature_prepare":
+        for window_size in window_sizes:
+            default_name = f"{base_exp_name}_w{window_size}" if len(window_sizes) > 1 else base_exp_name
+            exp_name = resolve_template(config.get("exp_name"), window_size, default_name)
+            args = namespace_for_stage(config, window_size, exp_name)
+            if "prepared_data_path" in config:
+                args.prepared_data_path = resolve_template(config.get("prepared_data_path"), window_size, str(config["prepared_data_path"]))
+            print(
+                "[main] internal pipeline: stock feature prepare "
+                f"source={getattr(args, 'source_data_path', 'datasets/SP500')} out={args.prepared_data_path}"
+            )
+            if dry_run:
+                continue
+            from src.gbm.datasets import prepare_stock_feature_dataset
+
+            prepare_stock_feature_dataset(args)
         return
 
     if pipeline in {"train", "validate", "test"}:
@@ -437,6 +498,42 @@ def run_config(config_path: Path, dry_run: bool) -> None:
         run_mad_visualize(args)
         return
 
+    if pipeline == "dataset_difference_histograms":
+        for window_size in window_sizes:
+            default_name = f"{base_exp_name}_w{window_size}" if len(window_sizes) > 1 else base_exp_name
+            exp_name = resolve_template(config.get("exp_name"), window_size, default_name)
+            args = namespace_for_stage(config, window_size, exp_name)
+            print(
+                "[main] internal pipeline: dataset difference histograms "
+                f"data={args.data_path} window_size={args.window_size}"
+            )
+            if dry_run:
+                continue
+            from src.gbm.visualize import run_dataset_difference_histograms
+
+            run_dataset_difference_histograms(args)
+        return
+
+    if pipeline == "dataset_logreturn_histograms":
+        for window_size in window_sizes:
+            default_name = f"{base_exp_name}_w{window_size}" if len(window_sizes) > 1 else base_exp_name
+            exp_name = resolve_template(config.get("exp_name"), window_size, default_name)
+            args = namespace_for_stage(config, window_size, exp_name)
+            if "histogram_all_out" in config:
+                args.histogram_all_out = resolve_template(config.get("histogram_all_out"), window_size, str(config["histogram_all_out"]))
+            if "histogram_anomaly_out" in config:
+                args.histogram_anomaly_out = resolve_template(config.get("histogram_anomaly_out"), window_size, str(config["histogram_anomaly_out"]))
+            print(
+                "[main] internal pipeline: dataset log-return histograms "
+                f"data={args.data_path} window_size={args.window_size}"
+            )
+            if dry_run:
+                continue
+            from src.gbm.visualize import run_dataset_logreturn_histograms
+
+            run_dataset_logreturn_histograms(args)
+        return
+
     if pipeline == "attention_visualize":
         for window_size in window_sizes:
             default_name = f"{base_exp_name}_w{window_size}" if len(window_sizes) > 1 else base_exp_name
@@ -451,6 +548,36 @@ def run_config(config_path: Path, dry_run: bool) -> None:
             from src.gbm.test import export_attention_artifacts
 
             export_attention_artifacts(args)
+        return
+
+    if pipeline == "model_diagnostic_panels":
+        args = namespace_for_stage(config)
+        print(f"[main] internal pipeline: model diagnostic panels csv={args.csv} out={args.out}")
+        if dry_run:
+            return
+        from src.gbm.visualize import run_model_diagnostic_panels
+
+        run_model_diagnostic_panels(args)
+        return
+
+    if pipeline == "endpoint_logreturn_score_panels":
+        args = namespace_for_stage(config)
+        print(f"[main] internal pipeline: endpoint log-return score panels csv={args.csv} out={args.out}")
+        if dry_run:
+            return
+        from src.gbm.visualize import run_endpoint_logreturn_score_panels
+
+        run_endpoint_logreturn_score_panels(args)
+        return
+
+    if pipeline == "nextday_report_figures":
+        args = namespace_for_stage(config)
+        print(f"[main] internal pipeline: next-day report figures out={args.out}")
+        if dry_run:
+            return
+        from src.gbm.visualize import run_nextday_report_figures
+
+        run_nextday_report_figures(args)
         return
 
     if pipeline == "experiment_suite":

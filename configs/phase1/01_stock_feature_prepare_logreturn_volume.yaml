@@ -1,0 +1,12 @@
+pipeline: stock_feature_prepare
+source_data_path: datasets/SP500
+prepared_data_path: datasets/SP500_logreturn_volume_w{window_size}
+tickers: all
+window_size: 30,60,90,128
+step: 1
+include_volatility: true
+volume_window: 20
+volatility_window: 20
+anomaly_baseline_window: 60
+label_z_threshold: 3.0
+high_swing_abs_log_return: 0.1

@@ -1,0 +1,10 @@
+# Raw-score MAD visualization for the completed MLE-parameter minimax diagnostic run.
+pipeline: mad_visualize
+csv: D:/AnomalyTransformerRuns/experiments/mle_param_minimax_w100_h8_l3_d512_lr0p0001_ep3_s42/reports/test_scores.csv
+out: D:/AnomalyTransformerRuns/experiments/mle_param_minimax_w100_h8_l3_d512_lr0p0001_ep3_s42/figures/mad_k3_raw_score
+tickers: all
+label_names: jump,drop,volatility_shock
+price_dir: datasets/SP500
+price_z_thr: 3.0
+outlier_k: 3.0
+score_formula: mle_param_softmax_product

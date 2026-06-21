@@ -133,6 +133,7 @@ dmypy.json
 # Research artifacts / generated outputs
 /results/
 /logs/
+/datasets/SP500_logreturn_volume_w*/
 /datasets_label_image/
 /configs/generated/
 /TODO/EXP*/reports/

@@ -91,6 +91,39 @@ def test_create_joint_manifest_and_dataset_shapes(tmp_path: Path) -> None:
     assert item["returns"].shape == (8,)
     assert item["time_deltas"].shape == (8,)
     assert item["meta"]["ticker"] == "AAA"
+    assert "target_return" not in item
+
+
+def test_next_day_target_uses_following_return(tmp_path: Path) -> None:
+    make_ticker_files(tmp_path, rows=12)
+
+    manifest, window_store, scaler = create_joint_manifest(
+        data_path=str(tmp_path),
+        tickers=["AAA"],
+        window_size=4,
+        step=1,
+        features="log_return_tail_vol",
+        seed=42,
+        split_method="chronological",
+        purge_gap=0,
+        train_normal_only=False,
+        target="next_day_log_return",
+    )
+    dataset = JointWindowDataset(
+        manifest,
+        window_store,
+        scaler,
+        window_size=4,
+        normalize_batch=False,
+        split="train",
+        train_normal_only=False,
+    )
+    item = dataset[0]
+    target_idx = item["meta"]["target_idx"]
+
+    assert "target_return" in item
+    assert target_idx == item["meta"]["start_idx"] + 4
+    assert item["target_return"].item() == pytest.approx(window_store["AAA"]["returns"][target_idx])
 
 
 def test_discover_tickers_and_window_labels(tmp_path: Path) -> None:

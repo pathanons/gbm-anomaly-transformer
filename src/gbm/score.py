@@ -52,6 +52,99 @@ def predictive_nll(
     raise ValueError("distribution must be gaussian or student_t")
 
 
+def mle_gbm_targets(
+    returns: torch.Tensor,
+    time_deltas: torch.Tensor | None = None,
+    eps: float = 1e-8,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Return per-window log-drift and GBM MLE volatility targets.
+
+    sigma^2 follows the irregular-time estimator:
+        mean(r_i^2 / dt_i) - R^2 / (n * T)
+    where R is total log return and T is total elapsed time.
+    """
+    if time_deltas is None:
+        time_deltas = torch.ones_like(returns)
+    else:
+        time_deltas = torch.clamp(time_deltas.to(device=returns.device, dtype=returns.dtype), min=eps)
+    n = torch.full((returns.size(0),), float(returns.size(1)), device=returns.device, dtype=returns.dtype)
+    total_time = torch.clamp(time_deltas.sum(dim=1), min=eps)
+    total_return = returns.sum(dim=1)
+    mu_real = total_return / total_time
+    sigma2_real = (returns.square() / time_deltas).sum(dim=1) / n - total_return.square() / (n * total_time)
+    sigma2_real = torch.clamp(sigma2_real, min=eps)
+    sigma_real = torch.sqrt(sigma2_real)
+    return mu_real, sigma2_real, sigma_real
+
+
+def mle_parameter_errors(
+    mu_pred: torch.Tensor,
+    sigma_pred: torch.Tensor,
+    attn_maps: list[dict[str, torch.Tensor]],
+    returns: torch.Tensor,
+    time_deltas: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Return window and pointwise errors for MLE mu/sigma prediction."""
+    mu_real, sigma2_real, sigma_real = mle_gbm_targets(returns, time_deltas=time_deltas)
+    sigma2_pred = torch.clamp(sigma_pred, min=1e-6).square()
+    head_error = (mu_pred - mu_real).square() + (sigma2_pred - sigma2_real).square()
+    point_terms = []
+    for attn in attn_maps:
+        drift = attn["prior_drift"]
+        sigma2 = torch.clamp(attn["prior_sigma"], min=1e-6).square()
+        point_terms.append(
+            (drift - mu_real[:, None, None]).square()
+            + (sigma2 - sigma2_real[:, None, None]).square()
+        )
+    point_error = torch.stack(point_terms, dim=0).mean(dim=(0, 2))
+    window_error = 0.5 * (head_error + point_error.mean(dim=1))
+    return window_error, point_error, mu_real, sigma_real
+
+
+def association_discrepancy_by_time(
+    attn_maps: list[dict[str, torch.Tensor]],
+    eps: float = 1e-8,
+    detach_series: bool = False,
+    detach_prior: bool = False,
+) -> torch.Tensor:
+    """Return mean symmetric KL per query timestamp, averaged over heads/layers."""
+    if not attn_maps:
+        raise ValueError("association_discrepancy_by_time requires attention maps")
+    terms = []
+    for attn in attn_maps:
+        series_raw = attn["series"].detach() if detach_series else attn["series"]
+        prior_raw = attn["prior"].detach() if detach_prior else attn["prior"]
+        series = torch.clamp(series_raw, min=eps)
+        prior = torch.clamp(prior_raw, min=eps)
+        series_to_prior = torch.sum(series * (torch.log(series) - torch.log(prior)), dim=-1)
+        prior_to_series = torch.sum(prior * (torch.log(prior) - torch.log(series)), dim=-1)
+        terms.append((0.5 * (series_to_prior + prior_to_series)).mean(dim=1))
+    return torch.stack(terms, dim=0).mean(dim=0)
+
+
+def softmax_association_weighted_nll(
+    nll_by_time: torch.Tensor,
+    attn_maps: list[dict[str, torch.Tensor]],
+    association_weight: float = 1.0,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Window score from Softmax(-AssDis) element-wise multiplied by per-step NLL."""
+    association_time = association_discrepancy_by_time(attn_maps)
+    weights = torch.softmax(-association_time, dim=1)
+    weighted_nll = weights * nll_by_time
+    return weighted_nll.sum(dim=1), association_time, weights
+
+
+def softmax_association_weighted_param_error(
+    param_error_by_time: torch.Tensor,
+    attn_maps: list[dict[str, torch.Tensor]],
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Window score from Softmax(-AssDis) element-wise multiplied by MLE parameter error."""
+    association_time = association_discrepancy_by_time(attn_maps)
+    weights = torch.softmax(-association_time, dim=1)
+    weighted_error = weights * param_error_by_time
+    return weighted_error.sum(dim=1), association_time, weights
+
+
 def predictive_std(sigma: torch.Tensor, nu: torch.Tensor | None = None, distribution: str = "gaussian") -> torch.Tensor:
     sigma = torch.clamp(sigma, min=1e-4)
     if distribution == "gaussian":
@@ -214,7 +307,15 @@ def average_precision_score_local(y_true: pd.Series, y_score: pd.Series) -> floa
     return precision_sum / positives
 
 def event_columns_from_label_file(label_df: pd.DataFrame) -> list[str]:
-    event_columns = [column for column in label_df.columns if column not in {"Date", "is_anomaly"}]
+    preferred = [column for column in ["log_return_anomaly", "volume_anomaly"] if column in label_df.columns]
+    if preferred:
+        return preferred
+    event_columns = [
+        column
+        for column in label_df.columns
+        if column not in {"Date", "split", "is_anomaly", "high_swing"}
+        and pd.api.types.is_numeric_dtype(label_df[column])
+    ]
     if not event_columns and "is_anomaly" in label_df.columns:
         event_columns = ["is_anomaly"]
     return event_columns
@@ -419,7 +520,26 @@ def collect_joint_scores(
                 return_attention=True,
             )
             recon_error = criterion(recon, x).mean(dim=(1, 2)) if use_recon else torch.zeros(x.size(0), device=device)
-            nll = predictive_nll(returns, mu, sigma, nu, distribution=predictive_distribution).mean(dim=1)
+            target_returns = batch["target_return"].to(device).unsqueeze(-1) if "target_return" in batch else returns
+            nll_by_time = predictive_nll(target_returns, mu, sigma, nu, distribution=predictive_distribution)
+            nll = nll_by_time.mean(dim=1)
+            window_nll_by_time = predictive_nll(returns, mu, sigma, nu, distribution=predictive_distribution)
+            softmax_product_score, association_discrepancy_time, association_softmax_weight = softmax_association_weighted_nll(
+                window_nll_by_time,
+                attn_maps,
+                association_weight=association_weight,
+            )
+            mle_param_error, mle_param_error_by_time, mu_real, sigma_real = mle_parameter_errors(
+                mu,
+                sigma,
+                attn_maps,
+                returns,
+                time_deltas=time_deltas,
+            )
+            mle_param_softmax_product_score, mle_association_time, mle_association_weight = softmax_association_weighted_param_error(
+                mle_param_error_by_time,
+                attn_maps,
+            )
             pred_std = predictive_std(sigma, nu, distribution=predictive_distribution)
             window_length = int(returns.size(-1))
             if use_divergence:
@@ -490,14 +610,20 @@ def collect_joint_scores(
             )
             if score_mode == "legacy":
                 score = legacy_score
+            elif score_mode == "nll_only":
+                score = nll
             elif score_mode == "refactored":
                 score = refactored_score
             elif score_mode == "qw2":
                 score = score_qw2
             elif score_mode == "qw2_tail":
                 score = score_qw2_tail
+            elif score_mode in {"softmax_product", "nll_assoc_softmax_product"}:
+                score = softmax_product_score
+            elif score_mode in {"mle_param_softmax_product", "mle_param"}:
+                score = mle_param_softmax_product_score
             else:
-                raise ValueError("score_mode must be legacy, refactored, qw2, or qw2_tail")
+                raise ValueError("score_mode must be legacy, nll_only, refactored, qw2, qw2_tail, softmax_product, or mle_param_softmax_product")
 
             if batch_idx == 1 or batch_idx == batch_total or batch_idx % max(1, batch_total // 5) == 0:
                 print(f"    [{phase}] batch {batch_idx}/{batch_total} | rows={len(score)}", flush=True)
@@ -511,9 +637,12 @@ def collect_joint_scores(
                         "window_id": int(meta["window_id"][idx]),
                         "start_idx": int(meta["start_idx"][idx]),
                         "end_idx": int(meta["end_idx"][idx]),
+                        "target_idx": int(meta["target_idx"][idx]) if "target_idx" in meta else int(meta["end_idx"][idx]),
                         "start_date": meta["start_date"][idx],
                         "end_date": meta["end_date"][idx],
+                        "target_date": meta["target_date"][idx] if "target_date" in meta else meta["end_date"][idx],
                         "y_true": int(batch["y"][idx].item()),
+                        "target_return": float(target_returns[idx].reshape(-1)[0].item()),
                         "reconstruction_error": float(recon_error[idx].item()),
                         "nll": float(nll[idx].item()),
                         "divergence": float(legacy_divergence[idx].item()),
@@ -521,6 +650,14 @@ def collect_joint_scores(
                         "dist_qw2": float(dist_qw2[idx].item()),
                         "dist_qw2_tail": float(dist_qw2_tail[idx].item()),
                         "association_discrepancy": float(association[idx].item()) if (use_association and association is not None) else 0.0,
+                        "association_discrepancy_time_mean": float(association_discrepancy_time[idx].mean().item()),
+                        "association_softmax_weight_max": float(association_softmax_weight[idx].max().item()),
+                        "association_softmax_weight_entropy": float(
+                            -(association_softmax_weight[idx] * torch.log(torch.clamp(association_softmax_weight[idx], min=1e-12))).sum().item()
+                        ),
+                        "softmax_product_score": float(softmax_product_score[idx].item()),
+                        "mle_param_error": float(mle_param_error[idx].item()),
+                        "mle_param_softmax_product_score": float(mle_param_softmax_product_score[idx].item()),
                         "score": float(score[idx].item()),
                         "legacy_score": float(legacy_score[idx].item()),
                         "refactored_score": float(refactored_score[idx].item()),
@@ -530,10 +667,12 @@ def collect_joint_scores(
                         "predictive_distribution": predictive_distribution,
                         "mu_pred": float(mu[idx].item()),
                         "sigma_pred": float(sigma[idx].item()),
+                        "mu_real": float(mu_real[idx].item()),
+                        "sigma_real": float(sigma_real[idx].item()),
                         "nu_pred": float(nu[idx].item()) if nu is not None else float("nan"),
                         "mu_obs": float(obs_mu[idx].item()),
                         "sigma_obs": float(obs_sigma[idx].item()),
-                        "tail_z_abs": float((torch.abs(returns[idx] - mu[idx]) / pred_std[idx]).max().item()),
+                        "tail_z_abs": float((torch.abs(target_returns[idx].reshape(-1) - mu[idx]) / pred_std[idx]).max().item()),
                     }
                 )
 
@@ -544,6 +683,7 @@ __all__ = [
     "SCORE_VARIANTS",
     "ScoreWeights",
     "add_test_event_columns",
+    "association_discrepancy_by_time",
     "apply_score_variants",
     "average_precision_score_local",
     "binary_metrics",
@@ -552,12 +692,16 @@ __all__ = [
     "event_columns_from_label_file",
     "gaussian_nll",
     "gaussian_wasserstein",
+    "mle_gbm_targets",
+    "mle_parameter_errors",
     "normalized_moment_discrepancy",
     "predictive_nll",
     "predictive_std",
     "quantile_wasserstein_score",
     "roc_auc_score_local",
     "score_windows",
+    "softmax_association_weighted_nll",
+    "softmax_association_weighted_param_error",
     "student_t_nll",
     "tail_weighted_quantile_wasserstein_score",
     "variant_label",

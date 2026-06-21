@@ -1,0 +1,12 @@
+pipeline: nextday_report_figures
+out: D:/AnomalyTransformerRuns/experiments/phase4_nextday_nll_w60_fast_compare
+data_path: datasets/SP500_event_taxonomy_w60
+student_csv: D:/AnomalyTransformerRuns/experiments/phase4_student_t_nextday_nll_w60_fast_ep3_s42/reports/test_scores.csv
+student_validation_csv: D:/AnomalyTransformerRuns/experiments/phase4_student_t_nextday_nll_w60_fast_ep3_s42/reports/validation_scores.csv
+gaussian_csv: D:/AnomalyTransformerRuns/experiments/phase4_gaussian_nextday_nll_w60_fast_ep3_s42/reports/test_scores.csv
+metrics_csv: D:/AnomalyTransformerRuns/experiments/phase4_nextday_nll_w60_fast_compare/metrics_summary.csv
+score_column: score
+label_column: endpoint_log_return_anomaly
+threshold_quantile: 0.99
+max_tickers: 6
+scatter_sample: 25000

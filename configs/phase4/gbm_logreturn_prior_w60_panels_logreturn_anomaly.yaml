@@ -1,0 +1,8 @@
+pipeline: model_diagnostic_panels
+csv: D:/AnomalyTransformerRuns/experiments/gbm_logreturn_prior_w60_logret_h4_l3_d128_lr0p0001_ep20_s42/reports/test_scores.csv
+data_path: datasets/SP500_logreturn_volume_w60
+out: D:/AnomalyTransformerRuns/experiments/gbm_logreturn_prior_w60_logret_h4_l3_d128_lr0p0001_ep20_s42/reports/panels_logreturn_anomaly
+split: test
+tickers: all
+label_names: log_return_anomaly
+score_column: score

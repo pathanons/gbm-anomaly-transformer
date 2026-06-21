@@ -1,0 +1,10 @@
+# MAD score-delta visualization for the 3-epoch product-loss model.
+pipeline: mad_visualize
+csv: D:/AnomalyTransformerRuns/experiments/product_nllassoc_w100_h2_l4_lr0p00005_ep3_s42/reports/test_scores.csv
+out: D:/AnomalyTransformerRuns/experiments/product_nllassoc_w100_h2_l4_lr0p00005_ep3_s42/figures/mad_k10_A_AKAM
+tickers: A,AKAM
+label_names: jump,drop,volatility_shock
+price_dir: datasets/SP500
+price_z_thr: 3.0
+outlier_k: 10.0
+score_formula: product

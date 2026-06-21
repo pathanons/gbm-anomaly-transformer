@@ -7,7 +7,7 @@ import pandas as pd
 import pytest
 
 torch = pytest.importorskip("torch")
-from src.gbm.model import AnomalyTransformer, gaussian_transition_timestamp_posterior, temporal_prior
+from src.gbm.model import AnomalyTransformer, gaussian_transition_timestamp_posterior, student_t_transition_timestamp_posterior, temporal_prior
 from src.gbm.score import (
     apply_score_variants,
     binary_metrics,
@@ -24,6 +24,19 @@ def test_transition_posterior_is_causal_and_row_normalized() -> None:
     sigma = torch.ones(1, 2, 4) * 0.2
 
     posterior = gaussian_transition_timestamp_posterior(returns, drift, sigma, n_heads=2)
+
+    assert posterior.shape == (1, 2, 4, 4)
+    assert torch.allclose(posterior.sum(dim=-1), torch.ones(1, 2, 4), atol=1e-5)
+    assert torch.allclose(posterior[:, :, 0, :], torch.tensor([1.0, 0.0, 0.0, 0.0]))
+    assert torch.all(posterior[:, :, 2, 3] < 1e-6)
+
+
+def test_student_t_transition_posterior_is_causal_and_row_normalized() -> None:
+    returns = torch.tensor([[0.0, 0.01, -0.02, 0.03]], dtype=torch.float32)
+    drift = torch.zeros(1, 2, 4)
+    sigma = torch.ones(1, 2, 4) * 0.2
+
+    posterior = student_t_transition_timestamp_posterior(returns, drift, sigma, n_heads=2)
 
     assert posterior.shape == (1, 2, 4, 4)
     assert torch.allclose(posterior.sum(dim=-1), torch.ones(1, 2, 4), atol=1e-5)

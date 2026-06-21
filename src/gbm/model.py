@@ -132,6 +132,56 @@ def canonical_gbm_attention_prior(
     )
 
 
+def gbm_log_return_likelihood_prior(
+    returns: torch.Tensor,
+    log_drift: torch.Tensor,
+    sigma: torch.Tensor,
+    n_heads: int,
+    time_deltas: Optional[torch.Tensor] = None,
+    eps: float = 1e-6,
+) -> torch.Tensor:
+    """Causal GBM likelihood prior over source timestamps.
+
+    For query timestamp i and candidate source j < i, the cumulative log-return
+    follows Normal(drift_i * elapsed_ij, sigma_i^2 * elapsed_ij). The first row
+    falls back to self mass because no earlier source timestamp exists.
+    """
+    batch_size, length = returns.shape
+    device = returns.device
+    dtype = returns.dtype
+    if time_deltas is None:
+        time_deltas = torch.ones_like(returns)
+    else:
+        time_deltas = torch.clamp(time_deltas.to(device=device, dtype=dtype), min=eps)
+
+    log_level = torch.cumsum(returns, dim=1)
+    increments = log_level[:, :, None] - log_level[:, None, :]
+    elapsed_prefix = F.pad(torch.cumsum(time_deltas, dim=1), (1, 0))
+    elapsed = elapsed_prefix[:, 1:, None] - elapsed_prefix[:, None, 1:]
+    elapsed = torch.clamp(elapsed, min=eps)
+
+    positions = torch.arange(length, device=device)
+    past = positions[:, None] > positions[None, :]
+    sigma = torch.clamp(sigma, min=eps)
+    mean = log_drift[:, :, :, None] * elapsed[:, None, :, :]
+    variance = sigma[:, :, :, None].square() * elapsed[:, None, :, :]
+    std = torch.sqrt(torch.clamp(variance, min=eps))
+    z = (increments[:, None, :, :] - mean) / std
+    log_prob = -0.5 * z.square() - torch.log(std) - 0.5 * math.log(2 * math.pi)
+
+    candidate_prior = torch.full((length, length), -1e9, device=device, dtype=dtype)
+    past_counts = torch.arange(length, device=device, dtype=dtype).clamp(min=1.0)
+    candidate_prior = candidate_prior.masked_fill(past, 0.0)
+    candidate_prior = candidate_prior - torch.log(past_counts[:, None])
+    posterior_logits = log_prob + candidate_prior[None, None, :, :]
+    posterior = torch.softmax(posterior_logits, dim=-1)
+
+    first_row = torch.zeros(length, device=device, dtype=dtype)
+    first_row[0] = 1.0
+    row0_mask = (positions == 0)[None, None, :, None]
+    return torch.where(row0_mask, first_row[None, None, None, :], posterior)
+
+
 def gaussian_transition_timestamp_posterior(
     returns: torch.Tensor,
     interval_log_drift: torch.Tensor,
@@ -180,6 +230,108 @@ def gaussian_transition_timestamp_posterior(
 gaussian_transition_attention_prior = gaussian_transition_timestamp_posterior
 
 
+def student_t_transition_timestamp_posterior(
+    returns: torch.Tensor,
+    interval_log_drift: torch.Tensor,
+    sigma: torch.Tensor,
+    n_heads: int,
+    time_deltas: Optional[torch.Tensor] = None,
+    df: float = 5.0,
+    eps: float = 1e-6,
+) -> torch.Tensor:
+    """Latent timestamp posterior with heavy-tailed Student-t transitions."""
+    batch_size, length = returns.shape
+    device = returns.device
+    dtype = returns.dtype
+    if time_deltas is None:
+        time_deltas = torch.ones_like(returns)
+    else:
+        time_deltas = torch.clamp(time_deltas.to(device=device, dtype=dtype), min=eps)
+
+    log_level = torch.cumsum(returns, dim=1)
+    increments = log_level[:, :, None] - log_level[:, None, :]
+    dt = time_deltas[:, None, :]
+    drift_prefix = F.pad(torch.cumsum(interval_log_drift * dt, dim=2), (1, 0))
+    variance_prefix = F.pad(torch.cumsum(torch.clamp(sigma, min=eps).square() * dt, dim=2), (1, 0))
+    mean = drift_prefix[:, :, 1:, None] - drift_prefix[:, :, None, 1:]
+    scale = torch.sqrt(torch.clamp(variance_prefix[:, :, 1:, None] - variance_prefix[:, :, None, 1:], min=eps))
+
+    nu = torch.as_tensor(max(float(df), 2.1), device=device, dtype=dtype)
+    z = (increments[:, None, :, :] - mean) / scale
+    log_prob = (
+        torch.lgamma((nu + 1.0) / 2.0)
+        - torch.lgamma(nu / 2.0)
+        - 0.5 * (torch.log(nu) + math.log(math.pi))
+        - torch.log(scale)
+        - 0.5 * (nu + 1.0) * torch.log1p(z.square() / nu)
+    )
+
+    positions = torch.arange(length, device=device)
+    past = positions[:, None] > positions[None, :]
+    candidate_prior = torch.full((length, length), -1e9, device=device, dtype=dtype)
+    past_counts = torch.arange(length, device=device, dtype=dtype).clamp(min=1.0)
+    candidate_prior = candidate_prior.masked_fill(past, 0.0) - torch.log(past_counts[:, None])
+    posterior = torch.softmax(log_prob + candidate_prior[None, None, :, :], dim=-1)
+    first_row = torch.zeros(length, device=device, dtype=dtype)
+    first_row[0] = 1.0
+    row0_mask = (positions == 0)[None, None, :, None]
+    return torch.where(row0_mask, first_row[None, None, None, :], posterior)
+
+
+def mle_gbm_attention_prior(
+    returns: torch.Tensor,
+    n_heads: int,
+    time_deltas: Optional[torch.Tensor] = None,
+    eps: float = 1e-6,
+) -> torch.Tensor:
+    """Latent timestamp posterior using per-window GBM MLE volatility.
+
+    The volatility estimator follows the irregular-time MLE form:
+        sigma^2 = mean(r_i^2 / dt_i) - mean(1) * R^2 / T
+    where R is the total log return and T is total elapsed time in the window.
+    """
+    batch_size, length = returns.shape
+    device = returns.device
+    dtype = returns.dtype
+    if time_deltas is None:
+        time_deltas = torch.ones_like(returns)
+    else:
+        time_deltas = torch.clamp(time_deltas.to(device=device, dtype=dtype), min=eps)
+
+    total_time = torch.clamp(time_deltas.sum(dim=1), min=eps)
+    total_return = returns.sum(dim=1)
+    n = torch.full_like(total_time, float(length))
+    sigma2 = (returns.square() / time_deltas).sum(dim=1) / n - total_return.square() / (n * total_time)
+    sigma2 = torch.clamp(sigma2, min=eps)
+    log_drift = total_return / total_time
+
+    log_level = torch.cumsum(returns, dim=1)
+    increments = log_level[:, :, None] - log_level[:, None, :]
+    elapsed_prefix = F.pad(torch.cumsum(time_deltas, dim=1), (1, 0))
+    elapsed = elapsed_prefix[:, 1:, None] - elapsed_prefix[:, None, 1:]
+
+    positions = torch.arange(length, device=device)
+    past = positions[:, None] > positions[None, :]
+    elapsed = torch.clamp(elapsed, min=eps)
+    mean = log_drift[:, None, None] * elapsed
+    variance = sigma2[:, None, None] * elapsed
+    std = torch.sqrt(torch.clamp(variance, min=eps))
+    z = (increments - mean) / std
+    log_prob = -0.5 * (z**2) - torch.log(std) - 0.5 * math.log(2 * math.pi)
+
+    candidate_prior = torch.full((length, length), -1e9, device=device, dtype=dtype)
+    past_counts = torch.arange(length, device=device, dtype=dtype).clamp(min=1.0)
+    candidate_prior = candidate_prior.masked_fill(past, 0.0)
+    candidate_prior = candidate_prior - torch.log(past_counts[:, None])
+    posterior_logits = log_prob + candidate_prior[None, :, :]
+    posterior = torch.softmax(posterior_logits, dim=-1)
+    first_row = torch.zeros(length, device=device, dtype=dtype)
+    first_row[0] = 1.0
+    row0_mask = (positions == 0)[None, :, None]
+    posterior = torch.where(row0_mask, first_row[None, None, :], posterior)
+    return posterior[:, None, :, :].expand(batch_size, n_heads, length, length)
+
+
 class TransitionPriorEncoderLayer(nn.Module):
     def __init__(
         self,
@@ -192,8 +344,8 @@ class TransitionPriorEncoderLayer(nn.Module):
         super().__init__()
         if d_model % n_heads != 0:
             raise ValueError("d_model must be divisible by n_heads")
-        if association_mode not in {"gaussian_log_return", "canonical_gbm", "temporal", "none"}:
-            raise ValueError("association_mode must be gaussian_log_return, canonical_gbm, temporal, or none")
+        if association_mode not in {"gaussian_log_return", "canonical_gbm", "gbm_log_return_likelihood", "student_t_log_return", "mle_gbm", "mle_learned_gbm", "temporal", "none"}:
+            raise ValueError("association_mode must be gaussian_log_return, canonical_gbm, gbm_log_return_likelihood, student_t_log_return, mle_gbm, mle_learned_gbm, temporal, or none")
         self.n_heads = n_heads
         self.head_dim = d_model // n_heads
         self.association_mode = association_mode
@@ -241,6 +393,31 @@ class TransitionPriorEncoderLayer(nn.Module):
         elif self.association_mode == "temporal" or returns is None:
             prior = temporal_prior(batch_size, self.n_heads, length, x.device)
             discrepancy = symmetric_kl(series, prior).mean(dim=(1, 2))
+        elif self.association_mode == "mle_gbm":
+            prior = mle_gbm_attention_prior(
+                returns,
+                self.n_heads,
+                time_deltas=time_deltas,
+            )
+            discrepancy = symmetric_kl(series, prior).mean(dim=(1, 2))
+        elif self.association_mode == "gbm_log_return_likelihood":
+            prior = gbm_log_return_likelihood_prior(
+                returns,
+                prior_drift,
+                prior_sigma,
+                self.n_heads,
+                time_deltas=time_deltas,
+            )
+            discrepancy = symmetric_kl(series, prior).mean(dim=(1, 2))
+        elif self.association_mode == "student_t_log_return":
+            prior = student_t_transition_timestamp_posterior(
+                returns,
+                prior_drift,
+                prior_sigma,
+                self.n_heads,
+                time_deltas=time_deltas,
+            )
+            discrepancy = symmetric_kl(series, prior).mean(dim=(1, 2))
         else:
             prior_fn = (
                 canonical_gbm_attention_prior
@@ -285,8 +462,8 @@ class AnomalyTransformer(nn.Module):
         super().__init__()
         if predictive_distribution not in {"gaussian", "student_t"}:
             raise ValueError("predictive_distribution must be gaussian or student_t")
-        if association_mode not in {"gaussian_log_return", "canonical_gbm", "temporal", "none"}:
-            raise ValueError("association_mode must be gaussian_log_return, canonical_gbm, temporal, or none")
+        if association_mode not in {"gaussian_log_return", "canonical_gbm", "gbm_log_return_likelihood", "student_t_log_return", "mle_gbm", "mle_learned_gbm", "temporal", "none"}:
+            raise ValueError("association_mode must be gaussian_log_return, canonical_gbm, gbm_log_return_likelihood, student_t_log_return, mle_gbm, mle_learned_gbm, temporal, or none")
         self.win_size = win_size
         self.enc_in = enc_in
         self.c_out = c_out
